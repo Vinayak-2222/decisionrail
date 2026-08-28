@@ -81,6 +81,44 @@ const SERVICE_API_KEY =
   process.env.SERVICE_API_KEY ||
   "decisionrail-dev-key";
 
+// --------------------------------------------------
+// CORS
+// Local frontend runs on http://localhost:5173.
+// Keep this explicit instead of allowing every origin.
+// --------------------------------------------------
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (origin === "http://localhost:5173") {
+    res.setHeader(
+      "Access-Control-Allow-Origin",
+      origin
+    );
+
+    res.setHeader(
+      "Vary",
+      "Origin"
+    );
+  }
+
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Authorization, Content-Type"
+  );
+
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, OPTIONS"
+  );
+
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+
+  next();
+});
+
 app.use(
   express.json()
 );
