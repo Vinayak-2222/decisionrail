@@ -19,7 +19,9 @@ const probabilities: Record<ActionType, number> = {
 };
 
 console.log("\n=== DAY 3: EV ENGINE TEST ===");
-console.log(`Amount at risk: ₹${amountAtRisk}`);
+console.log(
+  `Amount at risk: ₹${amountAtRisk}`
+);
 
 const results = engine.calculateAll(
   amountAtRisk,
@@ -31,20 +33,29 @@ console.log("\n=== ACTION VALUES ===");
 for (const result of results) {
   console.log(
     `${result.action.padEnd(14)} | ` +
-    `P=${(result.recoveryProbability * 100).toFixed(1)}% | ` +
+    `P=${(
+      result.recoveryProbability * 100
+    ).toFixed(1)}% | ` +
     `Expected recovery=₹${result.expectedRecoveryValue.toFixed(2)} | ` +
     `Cost=₹${result.actionCost.toFixed(2)} | ` +
     `EV=₹${result.expectedValue.toFixed(2)}`
   );
 }
 
-const best = engine.chooseBest(
+const choice = engine.chooseBest(
   amountAtRisk,
   probabilities
 );
 
 console.log("\n=== BEST ACTION ===");
-console.log(`Action: ${best.action}`);
-console.log(`Expected Value: ₹${best.expectedValue.toFixed(2)}`);
+console.log(
+  `Action: ${choice.best.action}`
+);
+console.log(
+  `Expected Value: ₹${choice.best.expectedValue.toFixed(2)}`
+);
+console.log(
+  `Tie detected: ${choice.isTie}`
+);
 
 console.log("\nStatus: SUCCESS");

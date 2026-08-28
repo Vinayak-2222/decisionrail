@@ -18,20 +18,20 @@ export interface EVResult {
   expectedValue: number;
 }
 
+export interface EVChoice {
+  best: EVResult;
+  secondBest: EVResult;
+  isTie: boolean;
+}
+
 /**
  * Expected Value Engine
- *
- * Converts:
- *
- *   recovery probability + amount at risk + action cost
- *
- * into an economic value for each possible action.
  *
  * EV = P(recovery) × amountAtRisk - actionCost
  *
  * IMPORTANT:
  * This component does NOT access PotentialOutcomes.
- * It only uses the estimator's predicted probability.
+ * It only uses estimator probabilities.
  */
 export class EVEngine {
   calculate(input: EVInput): EVResult {
@@ -40,9 +40,13 @@ export class EVEngine {
       Math.min(1, input.recoveryProbability)
     );
 
-    const amountAtRisk = Math.max(0, input.amountAtRisk);
+    const amountAtRisk = Math.max(
+      0,
+      input.amountAtRisk
+    );
 
-    const actionCost = ACTION_COSTS[input.action];
+    const actionCost =
+      ACTION_COSTS[input.action];
 
     const expectedRecoveryValue =
       probability * amountAtRisk;
@@ -75,49 +79,80 @@ export class EVEngine {
     return actions.map((action) =>
       this.calculate({
         action,
-        recoveryProbability: probabilities[action],
+        recoveryProbability:
+          probabilities[action],
         amountAtRisk,
       })
     );
   }
 
-    chooseBest(
-  amountAtRisk: number,
-  probabilities: Record<ActionType, number>
-): EVResult {
-  const results = this.calculateAll(
-    amountAtRisk,
-    probabilities
-  );
+  /**
+   * Selects the highest-EV action.
+   *
+   * IMPORTANT:
+   * Tie detection belongs here as information,
+   * but this engine does NOT convert a tie into
+   * an action such as "stop". The policy layer
+   * decides whether a tie requires human review.
+   */
+  chooseBest(
+    amountAtRisk: number,
+    probabilities: Record<ActionType, number>
+  ): EVChoice {
+    const results = this.calculateAll(
+      amountAtRisk,
+      probabilities
+    );
 
-  const sorted = [...results].sort(
-    (a, b) => b.expectedValue - a.expectedValue
-  );
+    const sorted = [...results].sort(
+      (a, b) =>
+        b.expectedValue - a.expectedValue
+    );
 
-  const best = sorted[0];
-  const secondBest = sorted[1];
+    const best = sorted[0];
+    const secondBest = sorted[1];
 
-  // Negative EV → Stop
-  if (best.expectedValue < 0) {
-    return results.find(
-      (result) => result.action === "stop"
-    )!;
+    if (!best || !secondBest) {
+      throw new Error(
+        "EVEngine requires at least two candidate actions."
+      );
+    }
+
+    // If every candidate has non-positive EV,
+    // the policy should choose Stop.
+    if (best.expectedValue <= 0) {
+      const stop =
+        results.find(
+          (result) =>
+            result.action === "stop"
+        );
+
+      if (!stop) {
+        throw new Error(
+          "Stop action is required but was not found."
+        );
+      }
+
+      return {
+        best: stop,
+        secondBest,
+        isTie: false,
+      };
+    }
+
+    const margin =
+      Math.abs(best.expectedValue) > 0
+        ? Math.abs(
+            best.expectedValue -
+              secondBest.expectedValue
+          ) /
+          Math.abs(best.expectedValue)
+        : 0;
+
+    return {
+      best,
+      secondBest,
+      isTie: margin <= 0.01,
+    };
   }
-
-  // Tie-margin detection
-  const margin =
-    Math.abs(best.expectedValue) > 0
-      ? Math.abs(
-          best.expectedValue - secondBest.expectedValue
-        ) / Math.abs(best.expectedValue)
-      : 0;
-
-  if (margin <= 0.01) {
-    return results.find(
-      (result) => result.action === "stop"
-    )!;
-  }
-
-  return best;
-}
 }
