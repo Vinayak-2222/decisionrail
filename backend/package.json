@@ -1,0 +1,29 @@
+{
+  "name": "decisionrail-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "start": "node dist/index.js",
+    "generate": "ts-node src/generator/index.ts",
+    "generate:verify": "ts-node src/generator/verify.ts",
+    "train:estimator": "ts-node src/estimator/trainEstimator.ts",
+    "test:ev": "ts-node src/policy/testEVEngine.ts",
+    "evaluate:decision": "ts-node src/evaluation/decisionEvaluator.ts",
+    "evaluate:baseline": "ts-node src/evaluation/baselineEvaluator.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongoose": "^8.5.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.19.43",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.4"
+  }
+}
