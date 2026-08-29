@@ -162,16 +162,53 @@ export class AuditService {
   /**
    * Returns only decision-explanation fields.
    *
-   * This is intentionally sanitized for the
-   * operational Decision Experience. It does not
-   * expose the complete raw audit document.
+   * Prefer the execution-completed audit event when
+   * available so the UI reflects the real resulting
+   * state. Fall back to the original decision-created
+   * event for approvals and decisions that have not
+   * produced a later execution event.
    */
   async getSanitizedDecisionExplanation(
     decisionId: string
   ): Promise<
     SanitizedDecisionExplanation | null
   > {
+    const executionEvent =
+      await AuditRecordModel.findOne({
+        decisionId,
+
+        eventId:
+          `${decisionId}-executed`,
+      })
+        .select({
+          _id: 0,
+
+          decisionId: 1,
+          caseId: 1,
+
+          likelihoods: 1,
+          evResults: 1,
+
+          chosenAction: 1,
+
+          policyChecks: 1,
+
+          requiresHumanApproval: 1,
+
+          policyAuthorized: 1,
+
+          modelVersion: 1,
+
+          policyVersion: 1,
+
+          costModelVersion: 1,
+
+          resultingState: 1,
+        })
+        .lean();
+
     const record =
+      executionEvent ||
       await AuditRecordModel.findOne({
         decisionId,
 

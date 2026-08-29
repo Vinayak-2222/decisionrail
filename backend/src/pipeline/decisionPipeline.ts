@@ -15,6 +15,10 @@ import {
 } from "../db/models/PotentialOutcomes";
 
 import {
+  CaseFeatures,
+} from "../generator/types";
+
+import {
   buildCaseContext,
 } from "../context/contextBuilder";
 
@@ -648,7 +652,7 @@ export class DecisionPipeline {
       });
     }
 
-    return {
+        return {
       casesProcessed:
         cases.length,
 
@@ -665,6 +669,474 @@ export class DecisionPipeline {
       totalAmountAtRisk,
 
       results,
+    };
+  }
+
+  async processSingleCase(
+    evaluationCase: CaseFeatures
+  ): Promise<PipelineCaseResult> {
+        const context =
+      buildCaseContext(evaluationCase);
+
+    const filtered =
+      this.policy.filterCandidates(
+        context
+      );
+
+    const probabilities =
+      {} as Record<ActionType, number>;
+
+    const confidenceByAction =
+      {} as Record<ActionType, number>;
+
+    for (
+      const action of
+      filtered.permittedActions
+    ) {
+      const input: LikelihoodInput = {
+        declineCategory:
+          context.declineCategory,
+
+        valueTier:
+          context.valueTier,
+
+        attemptNumber:
+          context.attemptNumber,
+
+        historicalRecoverer:
+          context.historicalRecoverer,
+
+        serialFailer:
+          context.serialFailer,
+
+        timeRemainingDays:
+          context.timeRemainingDays,
+
+        action,
+      };
+
+      const prediction =
+        this.estimator.predict(input);
+
+      probabilities[action] =
+        prediction.probability;
+
+      confidenceByAction[action] =
+        prediction.confidence;
+    }
+
+    const evResults =
+      filtered.permittedActions.map(
+        (action) =>
+          this.evEngine.calculate({
+            action,
+            recoveryProbability:
+              probabilities[action],
+            amountAtRisk:
+              context.amountAtRisk,
+          })
+      );
+
+    const sorted =
+      [...evResults].sort(
+        (a, b) =>
+          b.expectedValue -
+          a.expectedValue
+      );
+
+    const winner =
+      sorted[0];
+
+    if (!winner) {
+      throw new Error(
+        `No permitted action for ${context.caseId}`
+      );
+    }
+
+    const secondBest =
+      sorted[1];
+
+    const tieDetected =
+      secondBest !== undefined &&
+      Math.abs(
+        winner.expectedValue -
+          secondBest.expectedValue
+      ) /
+        Math.max(
+          Math.abs(
+            winner.expectedValue
+          ),
+          1
+        ) <= 0.01;
+
+    const finalPolicy =
+      this.policy.evaluateApprovalGates(
+        filtered,
+        context,
+        winner.action,
+        confidenceByAction,
+        tieDetected
+      );
+
+    const decisionId =
+      `${context.caseId}-cycle-1`;
+
+    const eventId =
+      `${decisionId}-created`;
+
+    await this.audit.recordDecision({
+      eventId,
+      decisionId,
+      caseId:
+        context.caseId,
+
+      inputSignals: {
+        declineCategory:
+          context.declineCategory,
+
+        valueTier:
+          context.valueTier,
+
+        retryCount:
+          context.attemptNumber,
+
+        timeRemainingDays:
+          context.timeRemainingDays,
+
+        amountAtRisk:
+          context.amountAtRisk,
+
+        historicalRecoverer:
+          context.historicalRecoverer,
+
+        serialFailer:
+          context.serialFailer,
+      },
+
+      likelihoods:
+        Object.fromEntries(
+          filtered.permittedActions.map(
+            (action) => [
+              action,
+              {
+                probability:
+                  probabilities[action],
+
+                confidence:
+                  confidenceByAction[action],
+              },
+            ]
+          )
+        ),
+
+      evResults:
+        Object.fromEntries(
+          evResults.map(
+            (result) => [
+              result.action,
+              result.expectedValue,
+            ]
+          )
+        ),
+
+      chosenAction:
+        winner.action,
+
+      policyChecks: {
+        permittedActions:
+          finalPolicy.permittedActions,
+
+        retryLimitReached:
+          finalPolicy.retryLimitReached,
+
+        contactCapReached:
+          finalPolicy.contactCapReached,
+
+        hardDecline:
+          finalPolicy.hardDecline,
+
+        highValueFlag:
+          finalPolicy.highValueFlag,
+
+        lowConfidenceFlag:
+          finalPolicy.lowConfidenceFlag,
+
+        tieFlag:
+          finalPolicy.tieFlag,
+
+        reasons:
+          finalPolicy.reasons,
+
+        source:
+          "razorpay",
+      },
+
+      requiresHumanApproval:
+        finalPolicy.requiresHumanApproval,
+
+      policyAuthorized:
+        finalPolicy.policyAuthorized,
+
+      modelVersion:
+        CONFIG_VERSION,
+
+      policyVersion:
+        CONFIG_VERSION,
+
+      costModelVersion:
+        CONFIG_VERSION,
+
+      resultingState:
+        finalPolicy.requiresHumanApproval
+          ? "Awaiting Human Approval"
+          : "At Risk",
+    });
+
+    if (
+      finalPolicy.requiresHumanApproval
+    ) {
+      await EvaluationCaseModel.updateOne(
+        {
+          caseId:
+            context.caseId,
+
+          state:
+            "At Risk",
+        },
+        {
+          $set: {
+            state:
+              "Awaiting Human Approval",
+          },
+        }
+      );
+
+      return {
+        caseId:
+          context.caseId,
+
+        decisionId,
+
+        chosenAction:
+          winner.action,
+
+        requiresHumanApproval:
+          true,
+
+        policyAuthorized:
+          finalPolicy.policyAuthorized,
+
+        permittedActions:
+          finalPolicy.permittedActions,
+
+        probability:
+          winner.recoveryProbability,
+
+        confidence:
+          confidenceByAction[
+            winner.action
+          ],
+
+        expectedValue:
+          winner.expectedValue,
+
+        resultingState:
+          "Awaiting Human Approval",
+
+        executed: false,
+
+        simulatedFailure: false,
+
+        recovered: false,
+
+        fallbackActive: false,
+      };
+    }
+
+    const execution =
+      await this.executor.execute({
+        decisionId,
+
+        caseId:
+          context.caseId,
+
+        currentState:
+          "At Risk",
+
+        action:
+          winner.action,
+
+        policyResult:
+          finalPolicy,
+      });
+
+    await this.audit.recordDecision({
+      eventId:
+        `${decisionId}-executed`,
+
+      decisionId,
+
+      caseId:
+        context.caseId,
+
+      inputSignals: {
+        declineCategory:
+          context.declineCategory,
+
+        valueTier:
+          context.valueTier,
+
+        retryCount:
+          context.attemptNumber,
+
+        timeRemainingDays:
+          context.timeRemainingDays,
+
+        amountAtRisk:
+          context.amountAtRisk,
+
+        historicalRecoverer:
+          context.historicalRecoverer,
+
+        serialFailer:
+          context.serialFailer,
+      },
+
+      likelihoods:
+        Object.fromEntries(
+          filtered.permittedActions.map(
+            (action) => [
+              action,
+              {
+                probability:
+                  probabilities[action],
+
+                confidence:
+                  confidenceByAction[action],
+              },
+            ]
+          )
+        ),
+
+      evResults:
+        Object.fromEntries(
+          evResults.map(
+            (result) => [
+              result.action,
+              result.expectedValue,
+            ]
+          )
+        ),
+
+      chosenAction:
+        winner.action,
+
+      policyChecks: {
+        permittedActions:
+          finalPolicy.permittedActions,
+
+        retryLimitReached:
+          finalPolicy.retryLimitReached,
+
+        contactCapReached:
+          finalPolicy.contactCapReached,
+
+        hardDecline:
+          finalPolicy.hardDecline,
+
+        highValueFlag:
+          finalPolicy.highValueFlag,
+
+        lowConfidenceFlag:
+          finalPolicy.lowConfidenceFlag,
+
+        tieFlag:
+          finalPolicy.tieFlag,
+
+        reasons:
+          finalPolicy.reasons,
+
+        source:
+          "razorpay",
+      },
+
+      requiresHumanApproval:
+        finalPolicy.requiresHumanApproval,
+
+      policyAuthorized:
+        finalPolicy.policyAuthorized,
+
+      modelVersion:
+        CONFIG_VERSION,
+
+      policyVersion:
+        CONFIG_VERSION,
+
+      costModelVersion:
+        CONFIG_VERSION,
+
+      executionResult: {
+        executed:
+          execution.executed,
+
+        simulatedFailure:
+          execution.simulatedFailure,
+
+        action:
+          execution.action,
+
+        reason:
+          execution.reason,
+      },
+
+      resultingState:
+        execution.finalState,
+
+      supersedes:
+        eventId,
+    });
+
+    return {
+      caseId:
+        context.caseId,
+
+      decisionId,
+
+      chosenAction:
+        winner.action,
+
+      requiresHumanApproval:
+        false,
+
+      policyAuthorized:
+        finalPolicy.policyAuthorized,
+
+      permittedActions:
+        finalPolicy.permittedActions,
+
+      probability:
+        winner.recoveryProbability,
+
+      confidence:
+        confidenceByAction[
+          winner.action
+        ],
+
+      expectedValue:
+        winner.expectedValue,
+
+      resultingState:
+        execution.finalState,
+
+      executed:
+        execution.executed,
+
+      simulatedFailure:
+        execution.simulatedFailure,
+
+      recovered: false,
+
+      fallbackActive: false,
     };
   }
 }

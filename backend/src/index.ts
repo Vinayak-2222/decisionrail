@@ -843,7 +843,7 @@ app.get(
       const cases =
         await EvaluationCaseModel.find({
           caseId:
-            /^eval-/,
+             /^(eval-|rp-)/
         })
           .sort({
             caseId:
@@ -1416,8 +1416,8 @@ app.get(
       const cases =
         await EvaluationCaseModel.find({
           caseId:
-            /^eval-/,
-        })
+           /^(eval-|rp-)/,
+          })
           .sort({
             caseId:
               1,
@@ -1526,7 +1526,7 @@ app.get(
 
 app.post(
   "/webhooks/razorpay",
-  (req, res) => {
+  async (req, res) => {
     const secret =
       process.env.RAZORPAY_WEBHOOK_SECRET;
 
@@ -1555,13 +1555,18 @@ app.post(
         .update(rawBody)
         .digest("hex");
 
+    const providedSignature =
+      Buffer.from(signature, "utf8");
+
+    const computedSignature =
+      Buffer.from(expectedSignature, "utf8");
+
     if (
+      providedSignature.length !==
+      computedSignature.length ||
       !crypto.timingSafeEqual(
-        Buffer.from(signature, "utf8"),
-        Buffer.from(
-          expectedSignature,
-          "utf8"
-        )
+        providedSignature,
+        computedSignature
       )
     ) {
       return res.status(400).json({
@@ -1588,10 +1593,199 @@ app.post(
       )
     );
 
-    return res.status(200).json({
-      received: true,
-      verified: true,
-    });
+    try {
+      const event =
+        req.body?.event;
+
+      // Only payment.failed currently drives the
+      // real Razorpay -> DecisionRail ingestion path.
+      if (event !== "payment.failed") {
+        return res.status(200).json({
+          received: true,
+          verified: true,
+          processed: false,
+          ignored: true,
+          event,
+        });
+      }
+
+      const paymentEntity =
+        req.body?.payload?.payment?.entity;
+
+      const paymentId =
+        paymentEntity?.id;
+
+      const amountPaise =
+        paymentEntity?.amount;
+
+      if (
+        typeof paymentId !== "string" ||
+        typeof amountPaise !== "number" ||
+        !Number.isFinite(amountPaise) ||
+        amountPaise <= 0
+      ) {
+        return res.status(400).json({
+          error:
+            "payment.failed payload missing a valid payment ID or amount.",
+        });
+      }
+
+      const amountAtRisk =
+        amountPaise / 100;
+
+      const caseId =
+        `rp-${paymentId}`;
+
+      const decisionId =
+        `${caseId}-cycle-1`;
+
+      const existingAudit =
+        await AuditRecordModel.findOne({
+          decisionId,
+        }).lean();
+
+      if (existingAudit) {
+        return res.status(200).json({
+          received: true,
+          verified: true,
+          processed: false,
+          duplicate: true,
+          caseId,
+          decisionId,
+        });
+      }
+
+      await EvaluationCaseModel.updateOne(
+        {
+          caseId,
+        },
+        {
+          $setOnInsert: {
+            caseId,
+            declineCategory:
+              "other_unclassified",
+            hardSoft:
+              "unknown",
+            valueTier:
+              "low",
+            arpu:
+              amountAtRisk,
+            amountAtRisk,
+            attemptNumber:
+              1,
+            retryHistory: [],
+            historicalRecoverer:
+              false,
+            serialFailer:
+              false,
+            timeRemainingDays:
+              3,
+            state:
+              "At Risk",
+            fallback_active:
+              false,
+          },
+        },
+        {
+          upsert: true,
+        }
+      );
+
+      const evaluationCase =
+        await EvaluationCaseModel.findOne({
+          caseId,
+        }).lean();
+
+      if (!evaluationCase) {
+        throw new Error(
+          `Failed to create Razorpay case ${caseId}`
+        );
+      }
+
+      const result =
+        await decisionPipeline.processSingleCase(
+          evaluationCase
+        );
+
+      // Preserve the real Razorpay failure metadata in the
+      // decision audit without changing the core decision model.
+      await AuditRecordModel.updateOne(
+        {
+          decisionId,
+          eventId:
+            `${decisionId}-created`,
+        },
+        {
+          $set: {
+            "policyChecks.source":
+              "razorpay",
+            "policyChecks.razorpayEvent":
+              event,
+            "policyChecks.razorpayPaymentId":
+              paymentId,
+            "policyChecks.razorpayErrorCode":
+              paymentEntity?.error_code ||
+              null,
+            "policyChecks.razorpayErrorStep":
+              paymentEntity?.error_step ||
+              null,
+            "policyChecks.razorpayErrorReason":
+              paymentEntity?.error_reason ||
+              null,
+          },
+        }
+      );
+
+      console.log(
+        "Razorpay case processed:",
+        JSON.stringify(
+          {
+            caseId,
+            decisionId,
+            paymentId,
+            amountAtRisk,
+            errorCode:
+              paymentEntity?.error_code ||
+              null,
+            errorStep:
+              paymentEntity?.error_step ||
+              null,
+            chosenAction:
+              result.chosenAction,
+            requiresHumanApproval:
+              result.requiresHumanApproval,
+            resultingState:
+              result.resultingState,
+          },
+          null,
+          2
+        )
+      );
+
+      return res.status(200).json({
+        received: true,
+        verified: true,
+        processed: true,
+        caseId,
+        decisionId,
+        chosenAction:
+          result.chosenAction,
+        requiresHumanApproval:
+          result.requiresHumanApproval,
+        resultingState:
+          result.resultingState,
+      });
+    } catch (error) {
+      console.error(
+        "[razorpay] webhook processing failed",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "Razorpay webhook processing failed.",
+      });
+    }
   }
 );
 
