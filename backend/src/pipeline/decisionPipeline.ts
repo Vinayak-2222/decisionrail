@@ -83,6 +83,15 @@ export interface PipelineRunResult {
   results: PipelineCaseResult[];
 }
 
+export interface RazorpayDecisionMetadata {
+  source: "razorpay";
+  razorpayEvent: string;
+  razorpayPaymentId: string;
+  razorpayErrorCode?: string | null;
+  razorpayErrorStep?: string | null;
+  razorpayErrorReason?: string | null;
+}
+
 export class DecisionPipeline {
   private readonly estimator: LikelihoodEstimator;
   private readonly evEngine: EVEngine;
@@ -673,7 +682,8 @@ export class DecisionPipeline {
   }
 
   async processSingleCase(
-    evaluationCase: CaseFeatures
+    evaluationCase: CaseFeatures,
+    razorpayMetadata?: RazorpayDecisionMetadata
   ): Promise<PipelineCaseResult> {
         const context =
       buildCaseContext(evaluationCase);
@@ -869,6 +879,10 @@ export class DecisionPipeline {
 
         source:
           "razorpay",
+
+        ...(razorpayMetadata
+          ? razorpayMetadata
+          : {}),
       },
 
       requiresHumanApproval:
@@ -1058,6 +1072,10 @@ export class DecisionPipeline {
 
         source:
           "razorpay",
+
+        ...(razorpayMetadata
+          ? razorpayMetadata
+          : {}),
       },
 
       requiresHumanApproval:

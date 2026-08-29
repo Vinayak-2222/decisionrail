@@ -107,7 +107,21 @@ const AuditRecordSchema = new Schema(
  * this model intentionally exposes no application-level
  * update/delete methods. Corrections are new records using
  * `supersedes`.
+ *
+ * Idempotency guarantee:
+ * the same decision/event pair can only exist once.
+ * Multiple events for the same decision are still allowed.
  */
+AuditRecordSchema.index(
+  {
+    decisionId: 1,
+    eventId: 1,
+  },
+  {
+    unique: true,
+    name: "uniq_decision_event",
+  }
+);
 
 export const AuditRecordModel = model(
   "AuditRecord",

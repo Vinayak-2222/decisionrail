@@ -1704,37 +1704,23 @@ app.post(
 
       const result =
         await decisionPipeline.processSingleCase(
-          evaluationCase
-        );
-
-      // Preserve the real Razorpay failure metadata in the
-      // decision audit without changing the core decision model.
-      await AuditRecordModel.updateOne(
-        {
-          decisionId,
-          eventId:
-            `${decisionId}-created`,
-        },
-        {
-          $set: {
-            "policyChecks.source":
-              "razorpay",
-            "policyChecks.razorpayEvent":
-              event,
-            "policyChecks.razorpayPaymentId":
+          evaluationCase,
+          {
+            source: "razorpay",
+            razorpayEvent: event,
+            razorpayPaymentId:
               paymentId,
-            "policyChecks.razorpayErrorCode":
+            razorpayErrorCode:
               paymentEntity?.error_code ||
               null,
-            "policyChecks.razorpayErrorStep":
+            razorpayErrorStep:
               paymentEntity?.error_step ||
               null,
-            "policyChecks.razorpayErrorReason":
+            razorpayErrorReason:
               paymentEntity?.error_reason ||
               null,
-          },
-        }
-      );
+          }
+        );
 
       console.log(
         "Razorpay case processed:",
@@ -1776,6 +1762,45 @@ app.post(
           result.resultingState,
       });
     } catch (error) {
+      const isDuplicateKey =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as { code?: unknown }).code ===
+          11000;
+
+      if (isDuplicateKey) {
+        const duplicatePaymentId =
+          req.body?.payload?.payment?.entity?.id;
+
+        const duplicateCaseId =
+          typeof duplicatePaymentId === "string"
+            ? `rp-${duplicatePaymentId}`
+            : undefined;
+
+        const duplicateDecisionId =
+          duplicateCaseId
+            ? `${duplicateCaseId}-cycle-1`
+            : undefined;
+
+        console.warn(
+          "[razorpay] duplicate webhook suppressed by database uniqueness",
+          {
+            caseId: duplicateCaseId,
+            decisionId: duplicateDecisionId,
+          }
+        );
+
+        return res.status(200).json({
+          received: true,
+          verified: true,
+          processed: false,
+          duplicate: true,
+          caseId: duplicateCaseId,
+          decisionId: duplicateDecisionId,
+        });
+      }
+
       console.error(
         "[razorpay] webhook processing failed",
         error
