@@ -120,7 +120,11 @@ app.use((req, res, next) => {
 });
 
 app.use(
-  express.json()
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+    },
+  })
 );
 
 // --------------------------------------------------
@@ -1523,13 +1527,56 @@ app.get(
 app.post(
   "/webhooks/razorpay",
   (req, res) => {
+    const secret =
+      process.env.RAZORPAY_WEBHOOK_SECRET;
+
+    const signature =
+      req.header("X-Razorpay-Signature");
+
+    const rawBody =
+      (req as Request & {
+        rawBody?: Buffer;
+      }).rawBody;
+
+    if (
+      !secret ||
+      !signature ||
+      !rawBody
+    ) {
+      return res.status(400).json({
+        error:
+          "Webhook signature validation data missing.",
+      });
+    }
+
+    const expectedSignature =
+      crypto
+        .createHmac("sha256", secret)
+        .update(rawBody)
+        .digest("hex");
+
+    if (
+      !crypto.timingSafeEqual(
+        Buffer.from(signature, "utf8"),
+        Buffer.from(
+          expectedSignature,
+          "utf8"
+        )
+      )
+    ) {
+      return res.status(400).json({
+        error:
+          "Invalid webhook signature.",
+      });
+    }
+
     console.log(
-      "\n=== RAZORPAY WEBHOOK RECEIVED ==="
+      "\n=== RAZORPAY WEBHOOK VERIFIED ==="
     );
 
     console.log(
-      "Headers:",
-      req.headers
+      "Event:",
+      req.body?.event
     );
 
     console.log(
@@ -1541,9 +1588,9 @@ app.post(
       )
     );
 
-    res.status(200).json({
-      received:
-        true,
+    return res.status(200).json({
+      received: true,
+      verified: true,
     });
   }
 );
