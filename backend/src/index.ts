@@ -34,6 +34,10 @@ import {
 } from "./metrics/metricsService";
 
 import {
+  StateManager,
+} from "./state/stateManager";
+
+import {
   LikelihoodEstimator,
   LikelihoodInput,
 } from "./estimator/likelihoodEstimator";
@@ -179,6 +183,9 @@ const metricsService =
 
 const decisionPipeline =
   new DecisionPipeline();
+
+const stateManager =
+  new StateManager();
 
 // --------------------------------------------------
 // AUTH HELPERS
@@ -1563,7 +1570,7 @@ app.post(
 
     if (
       providedSignature.length !==
-      computedSignature.length ||
+        computedSignature.length ||
       !crypto.timingSafeEqual(
         providedSignature,
         computedSignature
@@ -1597,9 +1604,17 @@ app.post(
       const event =
         req.body?.event;
 
-      // Only payment.failed currently drives the
-      // real Razorpay -> DecisionRail ingestion path.
-      if (event !== "payment.failed") {
+      const supportedEvents = [
+        "payment.failed",
+        "payment.authorized",
+        "payment.captured",
+      ];
+
+      if (
+        !supportedEvents.includes(
+          event
+        )
+      ) {
         return res.status(200).json({
           received: true,
           verified: true,
@@ -1619,19 +1634,30 @@ app.post(
         paymentEntity?.amount;
 
       if (
-        typeof paymentId !== "string" ||
-        typeof amountPaise !== "number" ||
-        !Number.isFinite(amountPaise) ||
-        amountPaise <= 0
+        typeof paymentId !== "string"
       ) {
         return res.status(400).json({
           error:
-            "payment.failed payload missing a valid payment ID or amount.",
+            "Razorpay payment webhook is missing a valid payment ID.",
         });
       }
 
       const amountAtRisk =
-        amountPaise / 100;
+        typeof amountPaise === "number" &&
+        Number.isFinite(amountPaise) &&
+        amountPaise > 0
+          ? amountPaise / 100
+          : undefined;
+
+      if (
+        event === "payment.failed" &&
+        amountAtRisk === undefined
+      ) {
+        return res.status(400).json({
+          error:
+            "payment.failed payload missing a valid payment amount.",
+        });
+      }
 
       const caseId =
         `rp-${paymentId}`;
@@ -1639,12 +1665,60 @@ app.post(
       const decisionId =
         `${caseId}-cycle-1`;
 
-      const existingAudit =
-        await AuditRecordModel.findOne({
-          decisionId,
+      const razorpayEventId =
+        req.header(
+          "x-razorpay-event-id"
+        ) ||
+        `${event}:${paymentId}`;
+
+      // --------------------------------------------------
+      // LOOK UP THE EXISTING REAL RAZORPAY CASE
+      // --------------------------------------------------
+
+      const existingCase =
+        await EvaluationCaseModel.findOne({
+          $or: [
+            {
+              razorpayPaymentId:
+                paymentId,
+            },
+            {
+              caseId,
+            },
+          ],
         }).lean();
 
-      if (existingAudit) {
+      const originalAudit =
+        await AuditRecordModel.findOne({
+          decisionId,
+          eventId:
+            `${decisionId}-created`,
+        }).lean();
+
+      const initialRazorpayEventId =
+        originalAudit?.policyChecks &&
+        typeof originalAudit.policyChecks ===
+          "object"
+          ? (
+              originalAudit.policyChecks as {
+                razorpayEventId?: unknown;
+              }
+            ).razorpayEventId
+          : undefined;
+
+      // --------------------------------------------------
+      // DUPLICATE OF THE ORIGINAL payment.failed EVENT
+      // --------------------------------------------------
+
+      if (
+        event === "payment.failed" &&
+        existingCase &&
+        (
+          !initialRazorpayEventId ||
+          initialRazorpayEventId ===
+            razorpayEventId
+        )
+      ) {
         return res.status(200).json({
           received: true,
           verified: true,
@@ -1655,6 +1729,303 @@ app.post(
         });
       }
 
+      // --------------------------------------------------
+      // CLOSED-LOOP OUTCOME
+      // --------------------------------------------------
+
+      if (
+        existingCase &&
+        (
+          event === "payment.authorized" ||
+          event === "payment.captured" ||
+          (
+            event === "payment.failed" &&
+            Boolean(originalAudit)
+          )
+        )
+      ) {
+        const currentState =
+          (
+            existingCase.state ||
+            "At Risk"
+          ) as
+            | "At Risk"
+            | "Awaiting Human Approval"
+            | "Retry Scheduled"
+            | "Recovered"
+            | "Escalated"
+            | "Stopped"
+            | "Halted";
+
+        const outcomeEventId =
+          `${decisionId}-outcome-${razorpayEventId}`;
+
+        const existingOutcome =
+          await AuditRecordModel.findOne({
+            decisionId,
+            eventId:
+              outcomeEventId,
+          }).lean();
+
+        if (existingOutcome) {
+          return res.status(200).json({
+            received: true,
+            verified: true,
+            processed: false,
+            duplicate: true,
+            outcome: true,
+            caseId,
+            decisionId,
+          });
+        }
+
+        const isRecovered =
+          event === "payment.authorized" ||
+          event === "payment.captured";
+
+        let resultingState =
+          currentState;
+
+        if (
+          isRecovered &&
+          ![
+            "Recovered",
+            "Stopped",
+            "Halted",
+          ].includes(currentState)
+        ) {
+          resultingState =
+            await stateManager
+              .transitionAndPersist(
+                caseId,
+                currentState,
+                {
+                  type:
+                    "payment_recovered",
+                }
+              );
+        } else if (
+          event === "payment.failed" &&
+          currentState ===
+            "Retry Scheduled"
+        ) {
+          resultingState =
+            await stateManager
+              .transitionAndPersist(
+                caseId,
+                currentState,
+                {
+                  type:
+                    "payment_failed",
+                  windowOpen:
+                    true,
+                }
+              );
+        }
+
+        const existingCaseAfterTransition =
+          await EvaluationCaseModel.findOne({
+            caseId,
+          }).lean();
+
+        const recoveredAmount =
+          isRecovered
+            ? (
+                typeof amountPaise ===
+                  "number" &&
+                Number.isFinite(
+                  amountPaise
+                ) &&
+                amountPaise > 0
+                  ? amountPaise / 100
+                  : existingCaseAfterTransition
+                      ?.amountAtRisk ||
+                    0
+              )
+            : 0;
+
+        await EvaluationCaseModel.updateOne(
+          {
+            caseId,
+          },
+          {
+            $set: {
+              recoveryOutcome:
+                isRecovered
+                  ? "recovered"
+                  : "failed",
+
+              recoveredAmount,
+
+              outcomeAt:
+                new Date(),
+            },
+          }
+        );
+
+        const baseAudit =
+          originalAudit ||
+          await auditService.getLatestDecisionEvent(
+            decisionId
+          );
+
+        const latestEvent =
+          await auditService.getLatestDecisionEvent(
+            decisionId
+          );
+
+        await auditService.recordDecision({
+          eventId:
+            outcomeEventId,
+
+          decisionId,
+
+          caseId,
+
+          inputSignals: {
+            declineCategory:
+              existingCase
+                .declineCategory,
+
+            valueTier:
+              existingCase.valueTier,
+
+            retryCount:
+              existingCase.attemptNumber,
+
+            timeRemainingDays:
+              existingCase.timeRemainingDays,
+
+            amountAtRisk:
+              existingCase.amountAtRisk,
+
+            historicalRecoverer:
+              existingCase.historicalRecoverer,
+
+            serialFailer:
+              existingCase.serialFailer,
+          },
+
+          likelihoods:
+            baseAudit?.likelihoods ||
+            {},
+
+          evResults:
+            baseAudit?.evResults ||
+            {},
+
+          chosenAction:
+            baseAudit?.chosenAction ||
+            "unknown",
+
+          policyChecks: {
+            ...(baseAudit?.policyChecks ||
+              {}),
+
+            source:
+              "razorpay",
+
+            razorpayEvent:
+              event,
+
+            razorpayEventId,
+
+            razorpayPaymentId:
+              paymentId,
+
+            razorpayErrorCode:
+              paymentEntity?.error_code ||
+              null,
+
+            razorpayErrorStep:
+              paymentEntity?.error_step ||
+              null,
+
+            razorpayErrorReason:
+              paymentEntity?.error_reason ||
+              null,
+
+            recoveryOutcome:
+              isRecovered
+                ? "recovered"
+                : "failed",
+
+            recoveredAmount,
+          },
+
+          requiresHumanApproval:
+            baseAudit?.requiresHumanApproval ??
+            false,
+
+          policyAuthorized:
+            baseAudit?.policyAuthorized ??
+            true,
+
+          modelVersion:
+            baseAudit?.modelVersion ||
+            "phase5-v1",
+
+          policyVersion:
+            baseAudit?.policyVersion ||
+            "phase5-v1",
+
+          costModelVersion:
+            baseAudit?.costModelVersion ||
+            "phase5-v1",
+
+          executionResult: {
+            outcomeEvent:
+              event,
+
+            razorpayEventId,
+
+            recovered:
+              isRecovered,
+
+            recoveredAmount,
+
+            resultingState,
+          },
+
+          resultingState,
+
+          supersedes:
+            latestEvent?.eventId,
+        });
+
+        return res.status(200).json({
+          received: true,
+          verified: true,
+          processed: true,
+          outcome: true,
+          caseId,
+          decisionId,
+          recoveryOutcome:
+            isRecovered
+              ? "recovered"
+              : "failed",
+          recoveredAmount,
+          resultingState,
+        });
+      }
+
+      // --------------------------------------------------
+      // FIRST REAL payment.failed EVENT
+      // --------------------------------------------------
+
+      if (event !== "payment.failed") {
+        return res.status(200).json({
+          received: true,
+          verified: true,
+          processed: false,
+          ignored: true,
+          reason:
+            "No matching DecisionRail case exists for this payment outcome.",
+          event,
+          paymentId,
+        });
+      }
+
       await EvaluationCaseModel.updateOne(
         {
           caseId,
@@ -1662,26 +2033,48 @@ app.post(
         {
           $setOnInsert: {
             caseId,
+
+            razorpayPaymentId:
+              paymentId,
+
+            recoveryOutcome:
+              "pending",
+
+            recoveredAmount:
+              0,
+
             declineCategory:
               "other_unclassified",
+
             hardSoft:
               "unknown",
+
             valueTier:
               "low",
+
             arpu:
-              amountAtRisk,
-            amountAtRisk,
+              amountAtRisk!,
+
+            amountAtRisk:
+              amountAtRisk!,
+
             attemptNumber:
               1,
+
             retryHistory: [],
+
             historicalRecoverer:
               false,
+
             serialFailer:
               false,
+
             timeRemainingDays:
               3,
+
             state:
               "At Risk",
+
             fallback_active:
               false,
           },
@@ -1707,15 +2100,23 @@ app.post(
           evaluationCase,
           {
             source: "razorpay",
-            razorpayEvent: event,
+
+            razorpayEvent:
+              event,
+
+            razorpayEventId,
+
             razorpayPaymentId:
               paymentId,
+
             razorpayErrorCode:
               paymentEntity?.error_code ||
               null,
+
             razorpayErrorStep:
               paymentEntity?.error_step ||
               null,
+
             razorpayErrorReason:
               paymentEntity?.error_reason ||
               null,
@@ -1766,7 +2167,11 @@ app.post(
         typeof error === "object" &&
         error !== null &&
         "code" in error &&
-        (error as { code?: unknown }).code ===
+        (
+          error as {
+            code?: unknown;
+          }
+        ).code ===
           11000;
 
       if (isDuplicateKey) {
@@ -1774,7 +2179,8 @@ app.post(
           req.body?.payload?.payment?.entity?.id;
 
         const duplicateCaseId =
-          typeof duplicatePaymentId === "string"
+          typeof duplicatePaymentId ===
+            "string"
             ? `rp-${duplicatePaymentId}`
             : undefined;
 
@@ -1786,8 +2192,11 @@ app.post(
         console.warn(
           "[razorpay] duplicate webhook suppressed by database uniqueness",
           {
-            caseId: duplicateCaseId,
-            decisionId: duplicateDecisionId,
+            caseId:
+              duplicateCaseId,
+
+            decisionId:
+              duplicateDecisionId,
           }
         );
 
@@ -1796,8 +2205,10 @@ app.post(
           verified: true,
           processed: false,
           duplicate: true,
-          caseId: duplicateCaseId,
-          decisionId: duplicateDecisionId,
+          caseId:
+            duplicateCaseId,
+          decisionId:
+            duplicateDecisionId,
         });
       }
 
@@ -1813,7 +2224,6 @@ app.post(
     }
   }
 );
-
 // --------------------------------------------------
 // ERROR HANDLER
 // --------------------------------------------------

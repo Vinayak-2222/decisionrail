@@ -24,6 +24,13 @@ export type StateEvent =
       windowOpen: boolean;
     }
   | {
+      type: "payment_recovered";
+    }
+  | {
+      type: "payment_failed";
+      windowOpen: boolean;
+    }
+  | {
       type: "human_approved";
       action: ActionType;
     }
@@ -70,6 +77,10 @@ export class StateManager {
 
     switch (from) {
       case "At Risk":
+        if (event.type === "payment_recovered") {
+          return "Recovered";
+        }
+
         if (event.type !== "decision_computed") {
           return null;
         }
@@ -85,11 +96,17 @@ export class StateManager {
         return "Retry Scheduled";
 
       case "Retry Scheduled":
-        if (event.type === "action_recovered") {
+        if (
+          event.type === "action_recovered" ||
+          event.type === "payment_recovered"
+        ) {
           return "Recovered";
         }
 
-        if (event.type === "action_failed") {
+        if (
+          event.type === "action_failed" ||
+          event.type === "payment_failed"
+        ) {
           return event.windowOpen
             ? "At Risk"
             : "Halted";
@@ -98,6 +115,10 @@ export class StateManager {
         return null;
 
       case "Awaiting Human Approval":
+        if (event.type === "payment_recovered") {
+          return "Recovered";
+        }
+
         if (
           event.type === "human_approved" ||
           event.type === "human_overridden"
@@ -120,6 +141,10 @@ export class StateManager {
         return null;
 
       case "Escalated":
+        if (event.type === "payment_recovered") {
+          return "Recovered";
+        }
+
         if (event.type === "human_resolved_escalation") {
           return event.recovered
             ? "Recovered"

@@ -72,6 +72,14 @@ export interface SanitizedDecisionExplanation {
   policyVersion: string;
 
   costModelVersion: string;
+
+  recoveryOutcome?: "pending" | "recovered" | "failed";
+
+  recoveredAmount?: number;
+
+  outcomeAt?: Date;
+
+  outcomeEvent?: string;
 }
 
 export class AuditService {
@@ -86,7 +94,6 @@ export class AuditService {
     const existing =
       await AuditRecordModel.findOne({
         decisionId: input.decisionId,
-
         eventId: input.eventId,
       }).lean();
 
@@ -120,11 +127,9 @@ export class AuditService {
   ) {
     return AuditRecordModel.findOne({
       decisionId,
-
       eventId:
         `${decisionId}-created`,
-    })
-      .lean();
+    }).lean();
   }
 
   /**
@@ -160,19 +165,62 @@ export class AuditService {
   }
 
   /**
-   * Returns only decision-explanation fields.
+   * Returns the latest meaningful decision
+   * explanation for the UI.
    *
-   * Prefer the execution-completed audit event when
-   * available so the UI reflects the real resulting
-   * state. Fall back to the original decision-created
-   * event for approvals and decisions that have not
-   * produced a later execution event.
+   * Priority:
+   *   1. recovery outcome event
+   *   2. execution event
+   *   3. original decision-created event
+   *
+   * This ensures the Decision Experience reflects
+   * the current real-world payment outcome.
    */
   async getSanitizedDecisionExplanation(
     decisionId: string
   ): Promise<
     SanitizedDecisionExplanation | null
   > {
+    const outcomeEvent =
+      await AuditRecordModel.findOne({
+        decisionId,
+        eventId: {
+          $regex:
+            `^${decisionId}-outcome-`,
+        },
+      })
+        .sort({
+          timestamp: -1,
+        })
+        .select({
+          _id: 0,
+
+          decisionId: 1,
+          caseId: 1,
+
+          likelihoods: 1,
+          evResults: 1,
+
+          chosenAction: 1,
+
+          policyChecks: 1,
+
+          requiresHumanApproval: 1,
+
+          policyAuthorized: 1,
+
+          modelVersion: 1,
+
+          policyVersion: 1,
+
+          costModelVersion: 1,
+
+          resultingState: 1,
+
+          timestamp: 1,
+        })
+        .lean();
+
     const executionEvent =
       await AuditRecordModel.findOne({
         decisionId,
@@ -207,8 +255,7 @@ export class AuditService {
         })
         .lean();
 
-    const record =
-      executionEvent ||
+    const createdEvent =
       await AuditRecordModel.findOne({
         decisionId,
 
@@ -242,9 +289,17 @@ export class AuditService {
         })
         .lean();
 
+    const record =
+      outcomeEvent ||
+      executionEvent ||
+      createdEvent;
+
     if (!record) {
       return null;
     }
+
+    const outcomePolicyChecks =
+      outcomeEvent?.policyChecks || {};
 
     return {
       decisionId:
@@ -282,6 +337,33 @@ export class AuditService {
 
       costModelVersion:
         record.costModelVersion,
+
+      recoveryOutcome:
+        outcomeEvent &&
+        typeof outcomePolicyChecks.recoveryOutcome ===
+          "string"
+          ? outcomePolicyChecks.recoveryOutcome as
+              | "pending"
+              | "recovered"
+              | "failed"
+          : undefined,
+
+      recoveredAmount:
+        outcomeEvent &&
+        typeof outcomePolicyChecks.recoveredAmount ===
+          "number"
+          ? outcomePolicyChecks.recoveredAmount
+          : undefined,
+
+      outcomeAt:
+        outcomeEvent?.timestamp,
+
+      outcomeEvent:
+        outcomeEvent &&
+        typeof outcomePolicyChecks.razorpayEvent ===
+          "string"
+          ? outcomePolicyChecks.razorpayEvent
+          : undefined,
     };
   }
 }

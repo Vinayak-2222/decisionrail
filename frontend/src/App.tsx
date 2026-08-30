@@ -8,6 +8,7 @@ import {
 import {
   approveCase,
   formatRupees,
+  getAudit,
   getDecisionExplanation,
   getCases,
   getExperimentMetrics,
@@ -33,6 +34,13 @@ type Screen =
   | "decision"
   | "comparison";
 
+type DecisionAuditWithOutcome = DecisionAudit & {
+  recoveryOutcome?: "pending" | "recovered" | "failed";
+  recoveredAmount?: number;
+  outcomeAt?: string;
+  outcomeEvent?: string;
+};
+
 interface Session {
   sessionId: string;
   user: User;
@@ -56,7 +64,7 @@ export default function App() {
   const [
     selectedAudit,
     setSelectedAudit
-  ] = useState<DecisionAudit | null>(null);
+  ] = useState<DecisionAuditWithOutcome | null>(null);
 
   const [metrics, setMetrics] =
     useState<ExperimentMetrics | null>(null);
@@ -69,9 +77,6 @@ export default function App() {
 
   const [notice, setNotice] =
     useState<string | null>(null);
-
-  const [humanActionsApplied, setHumanActionsApplied] =
-    useState(0);
 
   useEffect(() => {
     const stored = sessionStorage.getItem(
@@ -167,22 +172,30 @@ export default function App() {
       setLoading(true);
       setError(null);
 
-      /*
-       * Both RevOps and Admin use the sanitized
-       * decision-explanation endpoint here.
-       *
-       * Raw audit history remains available only
-       * through the Admin-only /audit/:decisionId route.
-       */
-      const result =
-        await getDecisionExplanation(
+      if (
+        session.user.role === "Admin"
+      ) {
+        const result = await getAudit(
           session.sessionId,
-          caseId
+          `${caseId}-cycle-1`
         );
 
-      setSelectedAudit(
-        result.explanation
-      );
+        setSelectedAudit(
+          result.records[
+            result.records.length - 1
+          ] || null
+        );
+      } else {
+        const result =
+          await getDecisionExplanation(
+            session.sessionId,
+            caseId
+          );
+
+        setSelectedAudit(
+          result.explanation
+        );
+      }
 
       setScreen("decision");
     } catch (err) {
@@ -247,10 +260,6 @@ export default function App() {
         "Human action applied successfully."
       );
 
-      setHumanActionsApplied(
-        count => count + 1
-      );
-
       await loadCases();
 
       if (
@@ -305,7 +314,6 @@ export default function App() {
     setMetrics(null);
     setSelectedCaseId(null);
     setSelectedAudit(null);
-    setHumanActionsApplied(0);
   }
 
   if (!session) {
@@ -402,8 +410,6 @@ export default function App() {
             <Comparison
               metrics={metrics}
               role={session.user.role}
-              cases={cases}
-              humanActionsApplied={humanActionsApplied}
             />
           )}
         </div>
@@ -1049,7 +1055,7 @@ function DecisionExperience({
     | null;
 
   audit:
-    | DecisionAudit
+    | DecisionAuditWithOutcome
     | null;
 
   role: Role;
@@ -1253,10 +1259,64 @@ function DecisionExperience({
                 <Info
                   label="Resulting state"
                   value={
-                    audit.resultingState
+                    audit.resultingState ||
+                    item.state
                   }
                 />
               </div>
+
+              {audit.recoveryOutcome && (
+                <div
+                  style={{
+                    marginTop: 18,
+                    padding: 16,
+                    border: "1px solid rgba(255,255,255,0.10)",
+                    borderRadius: 12
+                  }}
+                >
+                  <SectionTitle
+                    title="Recovery outcome"
+                    subtitle="Observed Razorpay payment result"
+                  />
+
+                  <div className="info-grid">
+                    <Info
+                      label="Outcome"
+                      value={
+                        audit.recoveryOutcome
+                      }
+                    />
+
+                    {typeof audit.recoveredAmount ===
+                      "number" && (
+                      <Info
+                        label="Recovered amount"
+                        value={formatRupees(
+                          audit.recoveredAmount
+                        )}
+                      />
+                    )}
+
+                    {audit.outcomeEvent && (
+                      <Info
+                        label="Razorpay event"
+                        value={
+                          audit.outcomeEvent
+                        }
+                      />
+                    )}
+
+                    {audit.outcomeAt && (
+                      <Info
+                        label="Observed at"
+                        value={new Date(
+                          audit.outcomeAt
+                        ).toLocaleString("en-IN")}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div
                 style={{
@@ -1516,16 +1576,12 @@ function DecisionExperience({
 
 function Comparison({
   metrics,
-  role,
-  cases,
-  humanActionsApplied
+  role
 }: {
   metrics:
     | ExperimentMetrics
     | null;
   role: Role;
-  cases: EvaluationCase[];
-  humanActionsApplied: number;
 }) {
   if (role !== "Admin") {
     return (
@@ -1608,36 +1664,6 @@ function Comparison({
           detail="Compared with baseline"
         />
       </div>
-
-      <section className="card" style={{ marginTop: 10, marginBottom: 10 }}>
-        <SectionTitle
-          title="Live operational update"
-          subtitle="Human actions change case operations immediately; the paired experiment metrics remain fixed for scientific integrity."
-        />
-
-        <div className="metrics-grid" style={{ marginTop: 12 }}>
-          <MetricLine
-            label="Approval cases still waiting"
-            value={String(
-              cases.filter(
-                item =>
-                  item.state ===
-                  "Awaiting Human Approval"
-              ).length
-            )}
-          />
-
-          <MetricLine
-            label="Human actions applied this session"
-            value={String(humanActionsApplied)}
-          />
-
-          <MetricLine
-            label="Experiment comparison"
-            value="Fixed / unchanged"
-          />
-        </div>
-      </section>
 
       <div className="two-columns">
         <section className="card">

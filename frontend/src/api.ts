@@ -138,10 +138,20 @@ export function getDecisionExplanation(
   sessionId: string,
   caseId: string
 ): Promise<{
-  explanation: DecisionAudit;
+  explanation: DecisionAudit & {
+    recoveryOutcome?: "pending" | "recovered" | "failed";
+    recoveredAmount?: number;
+    outcomeAt?: string;
+    outcomeEvent?: string;
+  };
 }> {
   return request<{
-    explanation: DecisionAudit;
+    explanation: DecisionAudit & {
+      recoveryOutcome?: "pending" | "recovered" | "failed";
+      recoveredAmount?: number;
+      outcomeAt?: string;
+      outcomeEvent?: string;
+    };
   }>(
     `/cases/${encodeURIComponent(caseId)}/decision`,
     {},

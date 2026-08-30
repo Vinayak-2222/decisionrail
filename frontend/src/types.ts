@@ -49,6 +49,17 @@ export interface EvaluationCase {
   timeRemainingDays: number;
   fallback_active?: boolean;
   state: CaseState;
+
+  razorpayPaymentId?: string;
+
+  recoveryOutcome?:
+    | "pending"
+    | "recovered"
+    | "failed";
+
+  recoveredAmount?: number;
+
+  outcomeAt?: string;
 }
 
 export interface CasesResponse {
@@ -107,6 +118,17 @@ export interface DecisionAudit {
   >;
 
   resultingState: string;
+
+  recoveryOutcome?:
+    | "pending"
+    | "recovered"
+    | "failed";
+
+  recoveredAmount?: number;
+
+  outcomeAt?: string;
+
+  outcomeEvent?: string;
 
   timestamp?: string;
   supersedes?: string;

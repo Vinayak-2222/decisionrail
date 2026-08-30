@@ -86,6 +86,7 @@ export interface PipelineRunResult {
 export interface RazorpayDecisionMetadata {
   source: "razorpay";
   razorpayEvent: string;
+  razorpayEventId?: string;
   razorpayPaymentId: string;
   razorpayErrorCode?: string | null;
   razorpayErrorStep?: string | null;
