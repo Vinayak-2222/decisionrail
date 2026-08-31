@@ -41,6 +41,23 @@ type DecisionAuditWithOutcome = DecisionAudit & {
   outcomeEvent?: string;
 };
 
+interface RazorpayRecoveryMetrics {
+  revenueAtRisk: number;
+  revenueRecovered: number;
+  recoveryRate: number;
+  openRecoveryCases: number;
+  recoveredPayments: number;
+  failedRecoveries: number;
+}
+
+interface RazorpayRecoveryResponse {
+  source: "razorpay_test_mode";
+  synthetic: false;
+  notice: string;
+  metrics: RazorpayRecoveryMetrics;
+  caseCount: number;
+}
+
 interface Session {
   sessionId: string;
   user: User;
@@ -68,6 +85,14 @@ export default function App() {
 
   const [metrics, setMetrics] =
     useState<ExperimentMetrics | null>(null);
+
+  const [
+    razorpayMetrics,
+    setRazorpayMetrics
+  ] =
+    useState<RazorpayRecoveryResponse | null>(
+      null
+    );
 
   const [loading, setLoading] =
     useState(false);
@@ -104,6 +129,7 @@ export default function App() {
     }
 
     void loadCases();
+    void loadRazorpayMetrics();
 
     if (
       session.user.role === "Admin"
@@ -156,6 +182,45 @@ export default function App() {
       setMetrics(data);
     } catch {
       // Admin-only metrics.
+    }
+  }
+
+  async function loadRazorpayMetrics() {
+    if (!session) {
+      return;
+    }
+
+    try {
+      const response =
+        await fetch(
+          `${
+            import.meta.env.VITE_API_URL || ""
+          }/api/razorpay/recovery-metrics`,
+          {
+            headers: {
+              Authorization:
+                `Bearer ${session.sessionId}`,
+            },
+          }
+        );
+
+      if (!response.ok) {
+        throw new Error(
+          `Failed to load Razorpay recovery metrics (HTTP ${response.status})`
+        );
+      }
+
+      const data =
+        (await response.json()) as RazorpayRecoveryResponse;
+
+      setRazorpayMetrics(data);
+    } catch (error) {
+      console.error(
+        "Razorpay recovery metrics unavailable",
+        error
+      );
+
+      setRazorpayMetrics(null);
     }
   }
 
@@ -312,6 +377,7 @@ export default function App() {
     setSession(null);
     setCases([]);
     setMetrics(null);
+    setRazorpayMetrics(null);
     setSelectedCaseId(null);
     setSelectedAudit(null);
   }
@@ -339,6 +405,7 @@ export default function App() {
           loading={loading}
           onRefresh={() => {
             void loadCases();
+            void loadRazorpayMetrics();
 
             if (
               session.user.role === "Admin"
@@ -365,6 +432,9 @@ export default function App() {
             <Overview
               cases={cases}
               metrics={metrics}
+              razorpayMetrics={
+                razorpayMetrics
+              }
               onQueue={() =>
                 setScreen("queue")
               }
@@ -568,12 +638,16 @@ function LoginPage({
 function Overview({
   cases,
   metrics,
+  razorpayMetrics,
   onQueue,
   onOpenCase
 }: {
   cases: EvaluationCase[];
   metrics:
     | ExperimentMetrics
+    | null;
+  razorpayMetrics:
+    | RazorpayRecoveryResponse
     | null;
   onQueue: () => void;
   onOpenCase: (
@@ -603,57 +677,218 @@ function Overview({
         }
       />
 
-      <div className="metrics-grid">
-        <MetricCard
-          label="DecisionRail recovered"
-          value={
-            metrics
-              ? formatRupees(
-                  metrics.decisionRail
-                    .recoveredAmount
-                )
-              : "—"
-          }
-          detail={
-            metrics
-              ? `${metrics.decisionRail.recoveryRate.toFixed(1)}% recovery`
-              : "Admin metrics"
-          }
+      <section
+        className="card"
+        style={{
+          marginBottom: 10,
+        }}
+      >
+        <div className="row-top">
+          <SectionTitle
+            title="Real Razorpay recovery"
+            subtitle="Razorpay Test Mode · observed payment outcomes"
+          />
+
+          <span
+            className="status"
+          >
+            {razorpayMetrics
+              ? `${razorpayMetrics.caseCount} case(s)`
+              : "Unavailable"}
+          </span>
+        </div>
+
+        {razorpayMetrics ? (
+          <>
+            <div
+              className="metrics-grid"
+              style={{
+                marginTop: 12,
+              }}
+            >
+              <MetricCard
+                label="Revenue at risk"
+                value={formatRupees(
+                  razorpayMetrics.metrics
+                    .revenueAtRisk
+                )}
+                detail="Total rp-* payment amounts"
+              />
+
+              <MetricCard
+                label="Recovered"
+                value={formatRupees(
+                  razorpayMetrics.metrics
+                    .revenueRecovered
+                )}
+                detail="Observed recovered amount"
+              />
+
+              <MetricCard
+                label="Recovery rate"
+                value={`${razorpayMetrics.metrics.recoveryRate.toFixed(
+                  1
+                )}%`}
+                detail="Recovered / at risk"
+              />
+
+              <MetricCard
+                label="Open recovery cases"
+                value={String(
+                  razorpayMetrics.metrics
+                    .openRecoveryCases
+                )}
+                detail="Outcome still pending"
+              />
+
+              <MetricCard
+                label="Recovered payments"
+                value={String(
+                  razorpayMetrics.metrics
+                    .recoveredPayments
+                )}
+                detail="Outcome = recovered"
+              />
+
+              <MetricCard
+                label="Failed recoveries"
+                value={String(
+                  razorpayMetrics.metrics
+                    .failedRecoveries
+                )}
+                detail="Outcome = failed"
+              />
+            </div>
+
+            <div
+              style={{
+                marginTop: 18,
+                fontSize: 12,
+                color: "#8a98aa",
+              }}
+            >
+              <strong
+                style={{
+                  color: "white",
+                }}
+              >
+                {formatRupees(
+                  razorpayMetrics.metrics
+                    .revenueRecovered
+                )}{" "}
+                recovered
+              </strong>{" "}
+              /{" "}
+              {formatRupees(
+                razorpayMetrics.metrics
+                  .revenueAtRisk
+              )}{" "}
+              at risk
+            </div>
+
+            <div
+              className="notice"
+              style={{
+                marginTop: 12,
+              }}
+            >
+              {razorpayMetrics.notice}
+            </div>
+          </>
+        ) : (
+          <div
+            className="notice"
+            style={{
+              marginTop: 12,
+            }}
+          >
+            Real Razorpay Test Mode recovery
+            metrics are currently unavailable.
+          </div>
+        )}
+      </section>
+
+      <section
+        className="card"
+        style={{
+          marginBottom: 10,
+        }}
+      >
+        <SectionTitle
+          title="Controlled experiment"
+          subtitle="Synthetic eval-* batch · DecisionRail vs Baseline"
         />
 
-        <MetricCard
-          label="Baseline recovered"
-          value={
-            metrics
-              ? formatRupees(
-                  metrics.baseline
-                    .recoveredAmount
-                )
-              : "—"
-          }
-          detail={
-            metrics
-              ? `${metrics.baseline.recoveryRate.toFixed(1)}% recovery`
-              : "Admin metrics"
-          }
-        />
+        <div className="metrics-grid" style={{ marginTop: 12 }}>
+          <MetricCard
+            label="DecisionRail recovered"
+            value={
+              metrics
+                ? formatRupees(
+                    metrics.decisionRail
+                      .recoveredAmount
+                  )
+                : "—"
+            }
+            detail={
+              metrics
+                ? `${metrics.decisionRail.recoveryRate.toFixed(1)}% recovery`
+                : "Admin metrics"
+            }
+          />
 
-        <MetricCard
-          label="Awaiting approval"
-          value={String(
-            pending.length
-          )}
-          detail="Needs human action"
-        />
+          <MetricCard
+            label="Baseline recovered"
+            value={
+              metrics
+                ? formatRupees(
+                    metrics.baseline
+                      .recoveredAmount
+                  )
+                : "—"
+            }
+            detail={
+              metrics
+                ? `${metrics.baseline.recoveryRate.toFixed(1)}% recovery`
+                : "Admin metrics"
+            }
+          />
 
-        <MetricCard
-          label="Evaluation cases"
-          value={String(
-            cases.length
-          )}
-          detail="Current synthetic batch"
-        />
-      </div>
+          <MetricCard
+            label="Awaiting approval"
+            value={String(
+              pending.length
+            )}
+            detail="Needs human action"
+          />
+
+          <MetricCard
+            label="Evaluation cases"
+            value={String(
+              cases.filter(
+                item =>
+                  item.caseId.startsWith(
+                    "eval-"
+                  )
+              ).length
+            )}
+            detail="Synthetic batch only"
+          />
+        </div>
+
+        {razorpayMetrics && (
+          <div
+            className="notice"
+            style={{
+              marginTop: 12,
+            }}
+          >
+            Synthetic experiment metrics are
+            intentionally kept separate from
+            Razorpay Test Mode outcomes.
+          </div>
+        )}
+      </section>
 
       <div className="two-columns">
         <section className="card">

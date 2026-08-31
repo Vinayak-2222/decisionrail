@@ -916,6 +916,142 @@ app.get(
 );
 
 // --------------------------------------------------
+// GET /api/razorpay/recovery-metrics
+//
+// RevOps + Admin.
+// Real Razorpay Test Mode cases only.
+// Does NOT touch synthetic eval-* metrics.
+// --------------------------------------------------
+
+app.get(
+  "/api/razorpay/recovery-metrics",
+  authenticate,
+  requireRole(
+    "RevOps",
+    "Admin"
+  ),
+  async (
+    _req,
+    res
+  ) => {
+    try {
+      const razorpayCases =
+        await EvaluationCaseModel.find({
+          caseId: /^rp-/,
+        })
+          .select({
+            _id: 0,
+
+            caseId: 1,
+
+            amountAtRisk: 1,
+
+            state: 1,
+
+            recoveryOutcome: 1,
+
+            recoveredAmount: 1,
+
+            razorpayPaymentId: 1,
+
+            outcomeAt: 1,
+          })
+          .lean();
+
+      const revenueAtRisk =
+        razorpayCases.reduce(
+          (
+            total,
+            item
+          ) =>
+            total +
+            Number(
+              item.amountAtRisk || 0
+            ),
+          0
+        );
+
+      const revenueRecovered =
+        razorpayCases.reduce(
+          (
+            total,
+            item
+          ) =>
+            total +
+            Number(
+              item.recoveredAmount || 0
+            ),
+          0
+        );
+
+      const openRecoveryCases =
+        razorpayCases.filter(
+          (item) =>
+            (
+              item.recoveryOutcome ||
+              "pending"
+            ) === "pending"
+        ).length;
+
+      const recoveredPayments =
+        razorpayCases.filter(
+          (item) =>
+            item.recoveryOutcome ===
+            "recovered"
+        ).length;
+
+      const failedRecoveries =
+        razorpayCases.filter(
+          (item) =>
+            item.recoveryOutcome ===
+            "failed"
+        ).length;
+
+      const recoveryRate =
+        revenueAtRisk > 0
+          ? (
+              revenueRecovered /
+              revenueAtRisk
+            ) * 100
+          : 0;
+
+      res.json({
+        source:
+          "razorpay_test_mode",
+
+        synthetic:
+          false,
+
+        notice:
+          "These metrics are based only on rp-* Razorpay Test Mode cases and observed outcomes. They are not production revenue metrics.",
+
+        metrics: {
+          revenueAtRisk,
+          revenueRecovered,
+          recoveryRate,
+          openRecoveryCases,
+          recoveredPayments,
+          failedRecoveries,
+        },
+
+        caseCount:
+          razorpayCases.length,
+      });
+    } catch (error) {
+      console.error(
+        "[api] Razorpay recovery metrics failed",
+        error
+      );
+
+      res.status(500).json({
+        error:
+          "Failed to load Razorpay recovery metrics.",
+      });
+    }
+  }
+);
+
+// --------------------------------------------------
 // GET /cases/:caseId
 //
 // RevOps + Admin.
