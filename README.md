@@ -266,7 +266,7 @@ Every human action is recorded with the actor identity, role, action, and result
 
 ## Failure Handling
 
-Day 7 verified the five critical failure scenarios:
+The project includes executable failure-injection and reliability checks for the five critical failure scenarios:
 
 - estimator unavailable,
 - duplicate event,
@@ -588,7 +588,7 @@ The architecture identifies these as optional extensions:
 
 ### Intentionally not implemented
 
-- Real money movement
+- Real production money movement
 - Real customer communication
 - Checkout recovery
 - B2B invoice recovery
@@ -600,7 +600,9 @@ The architecture identifies these as optional extensions:
 - Kubernetes
 - LLM-driven probability / EV / action decisions
 - Editable configurable-policy UI
-- Full end-to-end live Razorpay Test Mode payment-to-webhook demonstration
+- Production-scale payment retry execution
+
+The Razorpay integration currently operates in Test Mode. Webhook delivery and signature verification are demonstrated, but recovery execution itself remains simulated and no production payment is charged or moved.
 
 ---
 
@@ -619,11 +621,39 @@ The architecture identifies these as optional extensions:
 
 ## Current Razorpay Integration Status
 
-DecisionRail currently has a **Razorpay/webhook-shaped ingestion boundary** and a synthetic payment-failure ingestion path.
+DecisionRail has a demonstrated **Razorpay Test Mode webhook integration**.
 
-The project has **not** demonstrated a complete end-to-end flow where a real Razorpay Test Mode subscription failure is delivered by a real Razorpay webhook and then processed all the way through the live DecisionRail pipeline.
+The verified flow is:
 
-Therefore this repository does **not** claim full live Razorpay integration.
+```text
+Razorpay Test Mode payment.failed
+        ↓
+Webhook signature verification
+        ↓
+DecisionRail case creation / processing
+        ↓
+Likelihood + EV + policy decision
+        ↓
+Retry Scheduled / Human Approval / Stop
+        ↓
+Append-only audit record
+```
+
+A later `payment.captured` outcome can be submitted through the same verified webhook boundary and is processed as the closed-loop recovery outcome:
+
+```text
+payment.captured
+        ↓
+recoveryOutcome = recovered
+        ↓
+recoveredAmount persisted
+        ↓
+state = Recovered
+        ↓
+Recovery Control Center metrics updated
+```
+
+The project does **not** claim production Razorpay integration or real-money movement. The recovery action remains simulated, and the demonstrated `payment.captured` outcome used during development was an explicitly controlled Test Mode/simulated webhook event. This means the project can demonstrate the integration boundary and closed-loop state tracking without claiming production payment execution.
 
 ---
 
@@ -641,9 +671,9 @@ The measured recovery improvement is evidence about this controlled synthetic ex
 
 The likelihood model is trained and evaluated using synthetic data.
 
-### Limited live integration
+### Test Mode integration boundary
 
-The current Razorpay boundary is webhook-shaped rather than a fully demonstrated end-to-end Test Mode integration.
+The Razorpay Test Mode webhook boundary is demonstrated end-to-end for failure ingestion and recovery-outcome processing. Payment execution remains simulated, and the system makes no production-money or production-performance claim.
 
 ### Demo-oriented infrastructure
 
@@ -706,6 +736,8 @@ Stable identifiers, compare-and-swap-style resolution behavior, append-only audi
 ## Project Status
 
 **MVP status: Demo-ready**
+
+The current MVP includes a demonstrated Razorpay Test Mode webhook boundary for `payment.failed`, closed-loop recovery outcome handling, real/Test Mode recovery metrics for `rp-*` cases, the synthetic DecisionRail-vs-baseline experiment, Human Approval Queue, append-only audit trail, and failure-injection checks.
 
 The project has a working frontend, backend pipeline, explainability workflow, Human Approval Queue, baseline comparison, audit trail, failure-injection harness, and synthetic experiment.
 
