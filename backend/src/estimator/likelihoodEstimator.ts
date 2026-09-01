@@ -34,6 +34,10 @@ export interface LikelihoodPrediction {
  * Fallback path:
  *   category prior × action multiplier
  *
+ * STOP is a deliberate terminal action.
+ * It never represents incremental recovery, so its
+ * recovery probability is structurally fixed at 0.
+ *
  * PotentialOutcomes is NEVER used here.
  */
 export class LikelihoodEstimator {
@@ -53,13 +57,14 @@ export class LikelihoodEstimator {
     this.weights = [];
     this.bias = 0;
   }
+
   loadModel(model: {
-  weights: number[];
-  bias: number;
-}): void {
-  this.weights = [...model.weights];
-  this.bias = model.bias;
-}
+    weights: number[];
+    bias: number;
+  }): void {
+    this.weights = [...model.weights];
+    this.bias = model.bias;
+  }
 
   train(rows: TrainingRow[]): void {
     if (rows.length === 0) {
@@ -142,6 +147,9 @@ export class LikelihoodEstimator {
   /**
    * Normal inference path.
    *
+   * STOP is structurally defined as having
+   * zero incremental recovery probability.
+   *
    * If the model has not been trained or the input
    * cannot be encoded safely, use the category-prior
    * fallback instead of crashing.
@@ -150,17 +158,31 @@ export class LikelihoodEstimator {
     input: LikelihoodInput
   ): LikelihoodPrediction {
     try {
-      if (
-        this.weights.length === 0 ||
-        !this.isValidInput(input)
-      ) {
-        return this.predictFromCategoryPrior(
-          input
-        );
-      }
+  if (
+    this.weights.length === 0 ||
+    !this.isValidInput(input)
+  ) {
+    return this.predictFromCategoryPrior(
+      input
+    );
+  }
 
-      const features =
-        this.encode(input);
+  // STOP INVARIANT
+  //
+  // A trained model is never allowed to assign
+  // recovery probability to STOP.
+  if (input.action === "stop") {
+    return {
+      probability: 0,
+      confidence: 1,
+      usedFallback: false,
+    };
+  }
+
+  const features =
+    this.encode(input);
+
+
 
       const probability =
         this.sigmoid(
@@ -190,6 +212,9 @@ export class LikelihoodEstimator {
    * Uses only the configured category prior and
    * action multiplier. It does NOT use
    * PotentialOutcomes.
+   *
+   * STOP is always zero recovery regardless of
+   * historical flags or category prior.
    */
   private predictFromCategoryPrior(
     input: LikelihoodInput
@@ -205,6 +230,22 @@ export class LikelihoodEstimator {
       this.isValidAction(input?.action)
         ? input.action
         : "stop";
+
+    // --------------------------------------------------
+    // STOP INVARIANT
+    // --------------------------------------------------
+    //
+    // Do this before historical flag adjustments so
+    // recoverer/failer flags cannot create recovery
+    // probability for STOP.
+    //
+    if (action === "stop") {
+      return {
+        probability: 0,
+        confidence: 1,
+        usedFallback: true,
+      };
+    }
 
     const prior =
       BASE_PROPENSITY_BY_CATEGORY[
@@ -340,7 +381,7 @@ export class LikelihoodEstimator {
     );
   }
 
-    /**
+  /**
    * Export the trained model as a versionable artifact.
    */
   exportModel() {
@@ -358,17 +399,23 @@ export class LikelihoodEstimator {
       featureCount: this.weights.length,
     };
   }
+
   static fromModel(model: {
-  weights: number[];
-  bias: number;
-}): LikelihoodEstimator {
-  const estimator = new LikelihoodEstimator();
+    weights: number[];
+    bias: number;
+  }): LikelihoodEstimator {
+    const estimator =
+      new LikelihoodEstimator();
 
-  estimator.weights = [...model.weights];
-  estimator.bias = model.bias;
+    estimator.weights = [
+      ...model.weights,
+    ];
 
-  return estimator;
-}
+    estimator.bias =
+      model.bias;
+
+    return estimator;
+  }
 
   private encode(
     input: LikelihoodInput

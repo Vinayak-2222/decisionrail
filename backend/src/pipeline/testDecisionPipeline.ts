@@ -3,7 +3,79 @@ import {
   disconnectMongo,
 } from "../db/mongoClient";
 
+import {
+  EvaluationCaseModel,
+} from "../db/models/EvaluationCase";
+
+import {
+  AuditRecordModel,
+} from "../db/models/AuditRecord";
+
 import { DecisionPipeline } from "./decisionPipeline";
+
+async function resetEvaluationBatch(): Promise<void> {
+  const stateReset =
+    await EvaluationCaseModel.updateMany(
+      {
+        caseId: /^eval-/,
+      },
+      {
+        $set: {
+          state: "At Risk",
+          fallback_active: false,
+        },
+      }
+    );
+
+  const auditReset =
+    await AuditRecordModel.deleteMany({
+      caseId: /^eval-/,
+    });
+
+  console.log(
+    `Test reset: ${stateReset.modifiedCount} evaluation cases reset`
+  );
+
+  console.log(
+    `Test reset: ${auditReset.deletedCount} evaluation audit records cleared`
+  );
+
+  const cases =
+    await EvaluationCaseModel.find(
+      {
+        caseId: /^eval-/,
+      },
+      {
+        caseId: 1,
+        state: 1,
+      }
+    )
+      .lean();
+
+  if (cases.length !== 200) {
+    throw new Error(
+      `Expected 200 evaluation cases, found ${cases.length}`
+    );
+  }
+
+  const invalidStates =
+    cases.filter(
+      (item) =>
+        item.state !== "At Risk"
+    );
+
+  if (
+    invalidStates.length > 0
+  ) {
+    throw new Error(
+      `${invalidStates.length} evaluation cases were not reset to At Risk`
+    );
+  }
+
+  console.log(
+    "Test reset: batch verified at At Risk"
+  );
+}
 
 async function main() {
   await connectMongo();
@@ -12,6 +84,12 @@ async function main() {
     console.log(
       "\n=== DAY 5: FULL DECISIONRAIL PIPELINE ==="
     );
+
+    // --------------------------------------------------
+    // TEST FIXTURE RESET
+    // --------------------------------------------------
+
+    await resetEvaluationBatch();
 
     const pipeline =
       new DecisionPipeline();
@@ -63,7 +141,9 @@ async function main() {
       )
     );
 
-    if (result.casesProcessed !== 200) {
+    if (
+      result.casesProcessed !== 200
+    ) {
       throw new Error(
         `Expected 200 cases, got ${result.casesProcessed}`
       );
@@ -89,16 +169,18 @@ async function main() {
   }
 }
 
-main().catch(async (error) => {
-  console.error(
-    "\nDay 5 pipeline failed:"
-  );
+main().catch(
+  async (error) => {
+    console.error(
+      "\nDay 5 pipeline failed:"
+    );
 
-  console.error(error);
+    console.error(error);
 
-  try {
-    await disconnectMongo();
-  } catch {}
+    try {
+      await disconnectMongo();
+    } catch {}
 
-  process.exit(1);
-});
+    process.exit(1);
+  }
+);

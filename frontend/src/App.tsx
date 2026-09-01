@@ -1321,6 +1321,71 @@ function DecisionExperience({
       "retry_later"
     );
 
+  /*
+   * Read the actions that the backend policy has
+   * explicitly permitted.
+   *
+   * This is intentionally derived from the audit
+   * record rather than recreated in the frontend.
+   */
+  const permittedActions: ActionType[] =
+    audit &&
+    audit.policyChecks &&
+    Array.isArray(
+      audit.policyChecks
+        .permittedActions
+    )
+      ? audit.policyChecks.permittedActions
+          .filter(
+            (
+              action
+            ): action is ActionType =>
+              typeof action ===
+                "string" &&
+              [
+                "retry_now",
+                "retry_later",
+                "notify_only",
+                "escalate",
+                "stop",
+              ].includes(
+                action
+              )
+          )
+      : [];
+
+  /*
+   * Reset the Override selection whenever the
+   * selected case or its permitted action set changes.
+   *
+   * If the previous selection is no longer allowed,
+   * choose the first permitted action.
+   */
+  useEffect(() => {
+    if (
+      permittedActions.length ===
+      0
+    ) {
+      setOverrideAction(
+        "stop"
+      );
+
+      return;
+    }
+
+    setOverrideAction(
+      current =>
+        permittedActions.includes(
+          current
+        )
+          ? current
+          : permittedActions[0]
+    );
+  }, [
+    selectedCaseId,
+    audit
+  ]);
+
   if (!item) {
     return (
       <Empty
@@ -1333,6 +1398,24 @@ function DecisionExperience({
   const pending =
     item.state ===
     "Awaiting Human Approval";
+
+  const singlePolicyAction =
+    permittedActions.length ===
+    1
+      ? permittedActions[0]
+      : null;
+
+  const policyReasons =
+    audit?.policyChecks &&
+    Array.isArray(
+      audit.policyChecks.reasons
+    )
+      ? audit.policyChecks.reasons.filter(
+          value =>
+            typeof value ===
+            "string"
+        )
+      : [];
 
   return (
     <div>
@@ -1500,12 +1583,28 @@ function DecisionExperience({
                 />
               </div>
 
+              {singlePolicyAction && (
+                <div
+                  className="notice"
+                  style={{
+                    marginTop: 18
+                  }}
+                >
+                  {singlePolicyAction ===
+                  "stop"
+                    ? policyReasons[0] ||
+                      "Policy has blocked all recovery actions. Stop is the only permitted action."
+                    : `Policy currently permits only: ${singlePolicyAction}.`}
+                </div>
+              )}
+
               {audit.recoveryOutcome && (
                 <div
                   style={{
                     marginTop: 18,
                     padding: 16,
-                    border: "1px solid rgba(255,255,255,0.10)",
+                    border:
+                      "1px solid rgba(255,255,255,0.10)",
                     borderRadius: 12
                   }}
                 >
@@ -1546,7 +1645,9 @@ function DecisionExperience({
                         label="Observed at"
                         value={new Date(
                           audit.outcomeAt
-                        ).toLocaleString("en-IN")}
+                        ).toLocaleString(
+                          "en-IN"
+                        )}
                       />
                     )}
                   </div>
@@ -1633,32 +1734,38 @@ function DecisionExperience({
                   ([
                     action,
                     value
-                  ]) => (
-                    <div
-                      className="ev-row"
-                      key={
-                        action
-                      }
-                    >
-                      <div className="row-top">
-                        <span className="row-name">
-                          {
-                            action
-                          }
-                        </span>
+                  ]) => {
+                    const isStop =
+                      action ===
+                      "stop";
 
-                        <span className="row-value">
-                          {
-                            formatRupees(
-                              Number(
-                                value
-                              )
-                            )
-                          }
-                        </span>
+                    return (
+                      <div
+                        className="ev-row"
+                        key={
+                          action
+                        }
+                      >
+                        <div className="row-top">
+                          <span className="row-name">
+                            {
+                              action
+                            }
+                          </span>
+
+                          <span className="row-value">
+                            {isStop
+                              ? "₹0 — no incremental recovery"
+                              : formatRupees(
+                                  Number(
+                                    value
+                                  )
+                                )}
+                          </span>
+                        </div>
                       </div>
-                    </div>
-                  )
+                    );
+                  }
                 )}
               </div>
 
@@ -1744,6 +1851,10 @@ function DecisionExperience({
                   value={
                     overrideAction
                   }
+                  disabled={
+                    permittedActions.length ===
+                    0
+                  }
                   onChange={event =>
                     setOverrideAction(
                       event.target
@@ -1751,29 +1862,36 @@ function DecisionExperience({
                     )
                   }
                 >
-                  <option value="retry_now">
-                    Retry now
-                  </option>
-
-                  <option value="retry_later">
-                    Retry later
-                  </option>
-
-                  <option value="notify_only">
-                    Notify only
-                  </option>
-
-                  <option value="escalate">
-                    Escalate
-                  </option>
-
-                  <option value="stop">
-                    Stop
-                  </option>
+                  {permittedActions.map(
+                    action => (
+                      <option
+                        key={action}
+                        value={action}
+                      >
+                        {action ===
+                        "retry_now"
+                          ? "Retry now"
+                          : action ===
+                            "retry_later"
+                          ? "Retry later"
+                          : action ===
+                            "notify_only"
+                          ? "Notify only"
+                          : action ===
+                            "escalate"
+                          ? "Escalate"
+                          : "Stop"}
+                      </option>
+                    )
+                  )}
                 </select>
 
                 <button
                   className="button"
+                  disabled={
+                    permittedActions.length ===
+                    0
+                  }
                   onClick={() =>
                     onAction(
                       item.caseId,
