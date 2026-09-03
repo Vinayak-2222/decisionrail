@@ -75,7 +75,37 @@ export interface LikelihoodResult {
   probability: number;
   confidence: number;
 }
+export interface DecisionTimelineEvent {
+  eventId: string;
 
+  timestamp: string;
+
+  type:
+    | "payment_failed"
+    | "decision"
+    | "human_review"
+    | "action"
+    | "outcome";
+
+  title: string;
+
+  description: string;
+
+  actor?: string;
+
+  action?: string;
+
+  resultingState: string;
+
+  recoveryOutcome?:
+    | "pending"
+    | "recovered"
+    | "failed";
+
+  recoveredAmount?: number;
+
+  outcomeEvent?: string;
+}
 export interface DecisionAudit {
   _id?: string;
 
@@ -131,7 +161,10 @@ export interface DecisionAudit {
   outcomeEvent?: string;
 
   timestamp?: string;
+
   supersedes?: string;
+
+  timeline?: DecisionTimelineEvent[];
 }
 
 export interface AuditResponse {

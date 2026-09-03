@@ -11,11 +11,13 @@ import {
   getAudit,
   getDecisionExplanation,
   getCases,
+  getCase,
   getExperimentMetrics,
   login,
   logout,
   overrideCase,
-  stopCase
+  stopCase,
+  simulateEstimatorFailure
 } from "./api";
 
 import type {
@@ -34,12 +36,37 @@ type Screen =
   | "decision"
   | "comparison";
 
-type DecisionAuditWithOutcome = DecisionAudit & {
-  recoveryOutcome?: "pending" | "recovered" | "failed";
+interface DecisionTimelineEvent {
+  eventId: string;
+  timestamp: string;
+
+  type:
+    | "payment_failed"
+    | "decision"
+    | "human_review"
+    | "action"
+    | "outcome";
+
+  title: string;
+  description: string;
+
+  actor?: string;
+  action?: string;
+  resultingState: string;
+
+  recoveryOutcome?:
+    | "pending"
+    | "recovered"
+    | "failed";
+
   recoveredAmount?: number;
-  outcomeAt?: string;
   outcomeEvent?: string;
-};
+}
+
+type DecisionAuditWithOutcome =
+  DecisionAudit & {
+    timeline?: DecisionTimelineEvent[];
+  };
 
 interface RazorpayRecoveryMetrics {
   revenueAtRisk: number;
@@ -103,6 +130,44 @@ export default function App() {
   const [notice, setNotice] =
     useState<string | null>(null);
 
+  async function handleSimulateEstimatorFailure() {
+  if (!session || String(session.user.role).toLowerCase() !== "admin") {
+    return;
+  }
+
+  try {
+    setLoading(true);
+    setError(null);
+    setNotice(null);
+
+    const data = await simulateEstimatorFailure(
+      session.sessionId
+    );
+
+    setNotice(
+      "Estimator failure injected. Automatic execution blocked; human approval required."
+    );
+
+    const caseDetail = await getCase(
+      session.sessionId,
+      data.caseId
+    );
+
+    setCases((currentCases) => [
+      ...currentCases.filter(
+        (item) => item.caseId !== data.caseId
+      ),
+      caseDetail.case
+    ]);
+
+    await openCase(data.caseId);
+  } catch (err) {
+    setError(errorMessage(err));
+  } finally {
+    setLoading(false);
+  }
+}
+
   useEffect(() => {
     const stored = sessionStorage.getItem(
       "decisionrail-session"
@@ -132,7 +197,7 @@ export default function App() {
     void loadRazorpayMetrics();
 
     if (
-      session.user.role === "Admin"
+      String(session.user.role).toLowerCase() === "admin"
     ) {
       void loadMetrics();
     }
@@ -238,7 +303,7 @@ export default function App() {
       setError(null);
 
       if (
-        session.user.role === "Admin"
+        String(session.user.role).toLowerCase() === "admin"
       ) {
         const result = await getAudit(
           session.sessionId,
@@ -328,7 +393,7 @@ export default function App() {
       await loadCases();
 
       if (
-        session.user.role === "Admin"
+        String(session.user.role).toLowerCase() === "admin"
       ) {
         await loadMetrics();
       }
@@ -337,7 +402,7 @@ export default function App() {
        * Refresh the exact case that was acted on.
        */
       if (
-        session.user.role === "Admin"
+        String(session.user.role).toLowerCase() === "admin"
       ) {
         await openCase(caseId);
       }
@@ -408,7 +473,7 @@ export default function App() {
             void loadRazorpayMetrics();
 
             if (
-              session.user.role === "Admin"
+              String(session.user.role).toLowerCase() === "admin"
             ) {
               void loadMetrics();
             }
@@ -439,6 +504,11 @@ export default function App() {
                 setScreen("queue")
               }
               onOpenCase={openCase}
+              canSimulateFailure={true}
+  
+              onSimulateFailure={
+                handleSimulateEstimatorFailure
+              }
             />
           )}
 
@@ -640,7 +710,9 @@ function Overview({
   metrics,
   razorpayMetrics,
   onQueue,
-  onOpenCase
+  onOpenCase,
+  canSimulateFailure,
+  onSimulateFailure
 }: {
   cases: EvaluationCase[];
   metrics:
@@ -653,6 +725,8 @@ function Overview({
   onOpenCase: (
     caseId: string
   ) => void;
+  canSimulateFailure: boolean;
+  onSimulateFailure: () => void;
 }) {
   const pending =
     cases.filter(
@@ -668,12 +742,31 @@ function Overview({
         title="How are we doing?"
         description="Daily command center for recovery performance and the cases that need attention."
         action={
-          <button
-            className="button primary"
-            onClick={onQueue}
+          <div
+            style={{
+              display: "flex",
+              gap: 10,
+              alignItems: "center",
+              flexWrap: "wrap",
+              justifyContent: "flex-end"
+            }}
           >
-            Review approvals
-          </button>
+            {canSimulateFailure && (
+              <button
+                className="button"
+                onClick={onSimulateFailure}
+              >
+                Simulate estimator failure
+              </button>
+            )}
+
+            <button
+              className="button primary"
+              onClick={onQueue}
+            >
+              Review approvals
+            </button>
+          </div>
         }
       />
 
@@ -1654,6 +1747,10 @@ function DecisionExperience({
                 </div>
               )}
 
+              <RecoveryTimeline
+                events={audit.timeline}
+              />
+
               <div
                 style={{
                   marginTop: 22
@@ -1918,6 +2015,192 @@ function DecisionExperience({
             </div>
           )}
         </section>
+      </div>
+    </div>
+  );
+}
+
+// ==================================================
+// RECOVERY TIMELINE
+// ==================================================
+
+function RecoveryTimeline({
+  events
+}: {
+  events?: DecisionTimelineEvent[];
+}) {
+  if (!events || events.length === 0) {
+    return null;
+  }
+
+  return (
+    <div
+      style={{
+        marginTop: 22,
+        paddingTop: 4
+      }}
+    >
+      <SectionTitle
+        title="Recovery timeline"
+        subtitle="Persisted operational events for this decision"
+      />
+
+      <div
+        style={{
+          marginTop: 16
+        }}
+      >
+        {events.map((event, index) => {
+          const isLast =
+            index === events.length - 1;
+
+          return (
+            <div
+              key={event.eventId}
+              style={{
+                display: "grid",
+                gridTemplateColumns:
+                  "18px 1fr",
+                columnGap: 14,
+                position: "relative",
+                paddingBottom: isLast
+                  ? 0
+                  : 20
+              }}
+            >
+              <div
+                style={{
+                  position: "relative",
+                  display: "flex",
+                  justifyContent: "center"
+                }}
+              >
+                <div
+                  style={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: "50%",
+                    background:
+                      "currentColor",
+                    marginTop: 6
+                  }}
+                />
+
+                {!isLast && (
+                  <div
+                    style={{
+                      position:
+                        "absolute",
+                      top: 17,
+                      bottom: -4,
+                      width: 1,
+                      background:
+                        "rgba(255,255,255,0.14)"
+                    }}
+                  />
+                )}
+              </div>
+
+              <div>
+                <div
+                  className="row-top"
+                  style={{
+                    alignItems:
+                      "flex-start"
+                  }}
+                >
+                  <div>
+                    <div
+                      className="row-name"
+                      style={{
+                        fontSize: 15
+                      }}
+                    >
+                      {event.title}
+                    </div>
+
+                    <div
+                      style={{
+                        marginTop: 5,
+                        color:
+                          "rgba(255,255,255,0.65)",
+                        fontSize: 13,
+                        lineHeight: 1.5
+                      }}
+                    >
+                      {event.description}
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      color:
+                        "rgba(255,255,255,0.45)",
+                      fontSize: 12,
+                      whiteSpace:
+                        "nowrap",
+                      marginLeft: 12
+                    }}
+                  >
+                    {new Date(
+                      event.timestamp
+                    ).toLocaleString(
+                      "en-IN"
+                    )}
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    flexWrap: "wrap",
+                    marginTop: 8
+                  }}
+                >
+                  {event.action && (
+                    <span
+                      className="case-meta"
+                    >
+                      Action: {event.action}
+                    </span>
+                  )}
+
+                  {event.actor && (
+                    <span
+                      className="case-meta"
+                    >
+                      Actor: {event.actor}
+                    </span>
+                  )}
+
+                  {event.resultingState && (
+                    <span
+                      className="case-meta"
+                    >
+                      State: {
+                        event.resultingState
+                      }
+                    </span>
+                  )}
+
+                  {typeof event.recoveredAmount ===
+                    "number" && (
+                    <span
+                      className="case-meta"
+                    >
+                      Recovered: {
+                        formatRupees(
+                          event.recoveredAmount
+                        )
+                      }
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

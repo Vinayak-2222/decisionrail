@@ -1,4 +1,6 @@
-import { AuditRecordModel } from "../db/models/AuditRecord";
+import {
+  AuditRecordModel,
+} from "../db/models/AuditRecord";
 
 export interface CreateAuditInput {
   eventId: string;
@@ -23,11 +25,17 @@ export interface CreateAuditInput {
     }
   >;
 
-  evResults: Record<string, unknown>;
+  evResults: Record<
+    string,
+    unknown
+  >;
 
   chosenAction: string;
 
-  policyChecks: Record<string, unknown>;
+  policyChecks: Record<
+    string,
+    unknown
+  >;
 
   requiresHumanApproval: boolean;
   policyAuthorized: boolean;
@@ -36,11 +44,46 @@ export interface CreateAuditInput {
   policyVersion: string;
   costModelVersion: string;
 
-  executionResult?: Record<string, unknown>;
+  executionResult?: Record<
+    string,
+    unknown
+  >;
 
   resultingState: string;
 
   supersedes?: string;
+}
+
+export interface TimelineEvent {
+  eventId: string;
+
+  timestamp: Date;
+
+  type:
+    | "payment_failed"
+    | "decision"
+    | "human_review"
+    | "action"
+    | "outcome";
+
+  title: string;
+
+  description: string;
+
+  actor?: string;
+
+  action?: string;
+
+  resultingState: string;
+
+  recoveryOutcome?:
+    | "pending"
+    | "recovered"
+    | "failed";
+
+  recoveredAmount?: number;
+
+  outcomeEvent?: string;
 }
 
 export interface SanitizedDecisionExplanation {
@@ -57,9 +100,15 @@ export interface SanitizedDecisionExplanation {
     }
   >;
 
-  evResults: Record<string, unknown>;
+  evResults: Record<
+    string,
+    unknown
+  >;
 
-  policyChecks: Record<string, unknown>;
+  policyChecks: Record<
+    string,
+    unknown
+  >;
 
   requiresHumanApproval: boolean;
 
@@ -73,13 +122,18 @@ export interface SanitizedDecisionExplanation {
 
   costModelVersion: string;
 
-  recoveryOutcome?: "pending" | "recovered" | "failed";
+  recoveryOutcome?:
+    | "pending"
+    | "recovered"
+    | "failed";
 
   recoveredAmount?: number;
 
   outcomeAt?: Date;
 
   outcomeEvent?: string;
+
+  timeline: TimelineEvent[];
 }
 
 export class AuditService {
@@ -93,8 +147,11 @@ export class AuditService {
   ) {
     const existing =
       await AuditRecordModel.findOne({
-        decisionId: input.decisionId,
-        eventId: input.eventId,
+        decisionId:
+          input.decisionId,
+
+        eventId:
+          input.eventId,
       }).lean();
 
     if (existing) {
@@ -165,129 +222,360 @@ export class AuditService {
   }
 
   /**
+   * Convert persisted audit records into a
+   * sanitized operational timeline.
+   *
+   * Raw audit records remain Admin-only.
+   */
+  private buildSanitizedTimeline(
+    records: any[]
+  ): TimelineEvent[] {
+    return records
+      .map(
+        (
+          record
+        ): TimelineEvent | null => {
+          const eventId =
+            String(
+              record.eventId ||
+                ""
+            );
+
+          const policyChecks =
+            record.policyChecks ||
+            {};
+
+          const executionResult =
+            record.executionResult ||
+            {};
+
+          // --------------------------------------------
+          // DECISION CREATED
+          // --------------------------------------------
+
+          if (
+            eventId.endsWith(
+              "-created"
+            )
+          ) {
+            const source =
+              typeof policyChecks.source ===
+              "string"
+                ? policyChecks.source
+                : undefined;
+
+            const razorpayEvent =
+              typeof policyChecks.razorpayEvent ===
+              "string"
+                ? policyChecks.razorpayEvent
+                : undefined;
+
+            if (
+              source ===
+                "razorpay" ||
+              razorpayEvent ===
+                "payment.failed"
+            ) {
+              return {
+                eventId,
+
+                timestamp:
+                  record.timestamp,
+
+                type:
+                  "payment_failed",
+
+                title:
+                  "Payment failed",
+
+                description:
+                  razorpayEvent ||
+                  "Razorpay payment failure received.",
+
+                resultingState:
+                  record.resultingState,
+              };
+            }
+
+            return {
+              eventId,
+
+              timestamp:
+                record.timestamp,
+
+              type:
+                "decision",
+
+              title:
+                "Decision made",
+
+              description:
+                `Recommended action: ${record.chosenAction}.`,
+
+              action:
+                record.chosenAction,
+
+              resultingState:
+                record.resultingState,
+            };
+          }
+
+          // --------------------------------------------
+          // HUMAN APPROVAL / OVERRIDE / STOP
+          // --------------------------------------------
+
+          if (
+            eventId.includes(
+              "-human-"
+            )
+          ) {
+            const humanAction =
+              typeof policyChecks.humanAction ===
+              "string"
+                ? policyChecks.humanAction
+                : undefined;
+
+            const actorId =
+              typeof policyChecks.actorId ===
+              "string"
+                ? policyChecks.actorId
+                : undefined;
+
+            const resolvedAction =
+              typeof record.chosenAction ===
+              "string"
+                ? record.chosenAction
+                : undefined;
+
+            const description =
+              resolvedAction
+                ? `Human ${humanAction || "review"} resolved the case to ${resolvedAction}.`
+                : `Human ${humanAction || "review"} was recorded.`;
+
+            return {
+              eventId,
+
+              timestamp:
+                record.timestamp,
+
+              type:
+                "human_review",
+
+              title:
+                "Human decision",
+
+              description,
+
+              actor:
+                actorId,
+
+              action:
+                resolvedAction,
+
+              resultingState:
+                record.resultingState,
+            };
+          }
+
+          // --------------------------------------------
+          // AUTOMATIC EXECUTION
+          // --------------------------------------------
+
+          if (
+            eventId.endsWith(
+              "-executed"
+            )
+          ) {
+            const executed =
+              executionResult.executed;
+
+            return {
+              eventId,
+
+              timestamp:
+                record.timestamp,
+
+              type:
+                "action",
+
+              title:
+                "Recovery action",
+
+              description:
+                executed === false
+                  ? `Action ${record.chosenAction} was not executed.`
+                  : `Action ${record.chosenAction} executed.`,
+
+              action:
+                record.chosenAction,
+
+              resultingState:
+                record.resultingState,
+            };
+          }
+
+          // --------------------------------------------
+          // RAZORPAY OUTCOME
+          // --------------------------------------------
+
+          if (
+            eventId.includes(
+              "-outcome-"
+            )
+          ) {
+            const recoveryOutcome =
+              typeof policyChecks.recoveryOutcome ===
+              "string"
+                ? policyChecks.recoveryOutcome
+                : undefined;
+
+            const recoveredAmount =
+              typeof policyChecks.recoveredAmount ===
+              "number"
+                ? policyChecks.recoveredAmount
+                : undefined;
+
+            const razorpayEvent =
+              typeof policyChecks.razorpayEvent ===
+              "string"
+                ? policyChecks.razorpayEvent
+                : undefined;
+
+            let description =
+              "Recovery outcome observed.";
+
+            if (
+              recoveryOutcome ===
+              "recovered"
+            ) {
+              description =
+                typeof recoveredAmount ===
+                "number"
+                  ? `Payment recovered: ₹${recoveredAmount}.`
+                  : "Payment recovered.";
+            } else if (
+              recoveryOutcome ===
+              "failed"
+            ) {
+              description =
+                "Recovery attempt failed.";
+            } else if (
+              recoveryOutcome ===
+              "pending"
+            ) {
+              description =
+                "Recovery outcome is pending.";
+            }
+
+            return {
+              eventId,
+
+              timestamp:
+                record.timestamp,
+
+              type:
+                "outcome",
+
+              title:
+                "Outcome observed",
+
+              description,
+
+              resultingState:
+                record.resultingState,
+
+              recoveryOutcome:
+                recoveryOutcome as
+                  | "pending"
+                  | "recovered"
+                  | "failed"
+                  | undefined,
+
+              recoveredAmount,
+
+              outcomeEvent:
+                razorpayEvent,
+            };
+          }
+
+          return null;
+        }
+      )
+      .filter(
+        (
+          event
+        ): event is TimelineEvent =>
+          event !== null
+      );
+  }
+
+  /**
    * Returns the latest meaningful decision
    * explanation for the UI.
    *
-   * Priority:
-   *   1. recovery outcome event
-   *   2. execution event
-   *   3. original decision-created event
-   *
-   * This ensures the Decision Experience reflects
-   * the current real-world payment outcome.
+   * The raw audit history remains private,
+   * while a sanitized operational timeline is
+   * included for RevOps.
    */
   async getSanitizedDecisionExplanation(
     decisionId: string
   ): Promise<
     SanitizedDecisionExplanation | null
   > {
+    const history =
+      await this.getDecisionHistory(
+        decisionId
+      );
+
+    if (
+      history.length === 0
+    ) {
+      return null;
+    }
+
     const outcomeEvent =
-      await AuditRecordModel.findOne({
-        decisionId,
-        eventId: {
-          $regex:
-            `^${decisionId}-outcome-`,
-        },
-      })
-        .sort({
-          timestamp: -1,
-        })
-        .select({
-          _id: 0,
-
-          decisionId: 1,
-          caseId: 1,
-
-          likelihoods: 1,
-          evResults: 1,
-
-          chosenAction: 1,
-
-          policyChecks: 1,
-
-          requiresHumanApproval: 1,
-
-          policyAuthorized: 1,
-
-          modelVersion: 1,
-
-          policyVersion: 1,
-
-          costModelVersion: 1,
-
-          resultingState: 1,
-
-          timestamp: 1,
-        })
-        .lean();
+      history
+        .filter(
+          (
+            record
+          ) =>
+            String(
+              record.eventId
+            ).includes(
+              "-outcome-"
+            )
+        )
+        .sort(
+          (a, b) =>
+            new Date(
+              b.timestamp
+            ).getTime() -
+            new Date(
+              a.timestamp
+            ).getTime()
+        )[0];
 
     const executionEvent =
-      await AuditRecordModel.findOne({
-        decisionId,
-
-        eventId:
-          `${decisionId}-executed`,
-      })
-        .select({
-          _id: 0,
-
-          decisionId: 1,
-          caseId: 1,
-
-          likelihoods: 1,
-          evResults: 1,
-
-          chosenAction: 1,
-
-          policyChecks: 1,
-
-          requiresHumanApproval: 1,
-
-          policyAuthorized: 1,
-
-          modelVersion: 1,
-
-          policyVersion: 1,
-
-          costModelVersion: 1,
-
-          resultingState: 1,
-        })
-        .lean();
+      history.find(
+        (
+          record
+        ) =>
+          String(
+            record.eventId
+          ) ===
+          `${decisionId}-executed`
+      );
 
     const createdEvent =
-      await AuditRecordModel.findOne({
-        decisionId,
-
-        eventId:
-          `${decisionId}-created`,
-      })
-        .select({
-          _id: 0,
-
-          decisionId: 1,
-          caseId: 1,
-
-          likelihoods: 1,
-          evResults: 1,
-
-          chosenAction: 1,
-
-          policyChecks: 1,
-
-          requiresHumanApproval: 1,
-
-          policyAuthorized: 1,
-
-          modelVersion: 1,
-
-          policyVersion: 1,
-
-          costModelVersion: 1,
-
-          resultingState: 1,
-        })
-        .lean();
+      history.find(
+        (
+          record
+        ) =>
+          String(
+            record.eventId
+          ) ===
+          `${decisionId}-created`
+      );
 
     const record =
       outcomeEvent ||
@@ -299,7 +587,13 @@ export class AuditService {
     }
 
     const outcomePolicyChecks =
-      outcomeEvent?.policyChecks || {};
+      outcomeEvent?.policyChecks ||
+      {};
+
+    const timeline =
+      this.buildSanitizedTimeline(
+        history
+      );
 
     return {
       decisionId:
@@ -312,13 +606,16 @@ export class AuditService {
         record.chosenAction,
 
       likelihoods:
-        record.likelihoods || {},
+        record.likelihoods ||
+        {},
 
       evResults:
-        record.evResults || {},
+        record.evResults ||
+        {},
 
       policyChecks:
-        record.policyChecks || {},
+        record.policyChecks ||
+        {},
 
       requiresHumanApproval:
         record.requiresHumanApproval,
@@ -342,10 +639,12 @@ export class AuditService {
         outcomeEvent &&
         typeof outcomePolicyChecks.recoveryOutcome ===
           "string"
-          ? outcomePolicyChecks.recoveryOutcome as
-              | "pending"
-              | "recovered"
-              | "failed"
+          ? (
+              outcomePolicyChecks.recoveryOutcome as
+                | "pending"
+                | "recovered"
+                | "failed"
+            )
           : undefined,
 
       recoveredAmount:
@@ -364,6 +663,8 @@ export class AuditService {
           "string"
           ? outcomePolicyChecks.razorpayEvent
           : undefined,
+
+      timeline,
     };
   }
 }

@@ -251,3 +251,36 @@ export function formatRupees(
     }
   ).format(amount);
 }
+export function simulateEstimatorFailure(
+  sessionId: string
+): Promise<{
+  success: boolean;
+  injection: string;
+  caseId: string;
+  decisionId: string;
+  fallbackApplied: boolean;
+  fallbackProbability: number;
+  fallbackConfidence: number;
+  resultingState: string;
+  safeResolution: string;
+  nextStep: string;
+}> {
+  return request<{
+    success: boolean;
+    injection: string;
+    caseId: string;
+    decisionId: string;
+    fallbackApplied: boolean;
+    fallbackProbability: number;
+    fallbackConfidence: number;
+    resultingState: string;
+    safeResolution: string;
+    nextStep: string;
+  }>(
+    "/admin/failure-injection/estimator",
+    {
+      method: "POST"
+    },
+    sessionId
+  );
+}
